@@ -27,6 +27,7 @@ use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 
 use alacritty_terminal::tty;
 
+mod claude_sessions;
 mod cli;
 mod clipboard;
 mod config;
@@ -45,6 +46,7 @@ mod panic;
 mod polling;
 mod renderer;
 mod scheduler;
+mod session;
 mod string;
 mod window_context;
 

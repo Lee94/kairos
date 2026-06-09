@@ -18,7 +18,9 @@ use glutin::surface::{Surface, SwapInterval, WindowSurface};
 use log::{debug, info};
 use parking_lot::MutexGuard;
 use serde::{Deserialize, Serialize};
+
 use winit::dpi::PhysicalSize;
+use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::ModifiersState;
 use winit::raw_window_handle::RawWindowHandle;
 use winit::window::CursorIcon;
@@ -48,6 +50,7 @@ use crate::display::content::{RenderableContent, RenderableCursor};
 use crate::display::cursor::IntoRects;
 use crate::display::damage::{DamageTracker, damage_y_to_viewport_y};
 use crate::display::hint::{HintMatch, HintState};
+use crate::display::chrome::{Chrome, Hit};
 use crate::display::meter::Meter;
 use crate::display::window::Window;
 use crate::event::{Event, EventType, Mouse, SearchState};
@@ -64,6 +67,7 @@ pub mod hint;
 pub mod window;
 
 mod bell;
+mod chrome;
 mod damage;
 mod meter;
 
@@ -161,6 +165,13 @@ pub struct SizeInfo<T = f32> {
     /// Vertical window padding.
     padding_y: T,
 
+    /// Extra pixels reserved at the top of the window for the egui chrome (tab bar). The grid and
+    /// all overlays are shifted down by this amount.
+    top_extra: T,
+
+    /// Extra horizontal pixels reserved on the left edge for the egui project sidebar.
+    left_extra: T,
+
     /// Number of lines in the viewport.
     screen_lines: usize,
 
@@ -177,7 +188,10 @@ impl From<SizeInfo<f32>> for SizeInfo<u32> {
             cell_height: size_info.cell_height as u32,
             padding_x: size_info.padding_x as u32,
             padding_y: size_info.padding_y as u32,
+            top_extra: size_info.top_extra as u32,
+            left_extra: size_info.left_extra as u32,
             screen_lines: size_info.screen_lines,
+            // NOTE: pre-existing upstream quirk — this mirrors `screen_lines`, not `columns`.
             columns: size_info.screen_lines,
         }
     }
@@ -224,6 +238,16 @@ impl<T: Clone + Copy> SizeInfo<T> {
     pub fn padding_y(&self) -> T {
         self.padding_y
     }
+
+    #[inline]
+    pub fn top_extra(&self) -> T {
+        self.top_extra
+    }
+
+    #[inline]
+    pub fn left_extra(&self) -> T {
+        self.left_extra
+    }
 }
 
 impl SizeInfo<f32> {
@@ -255,6 +279,8 @@ impl SizeInfo<f32> {
             cell_height,
             padding_x: padding_x.floor(),
             padding_y: padding_y.floor(),
+            top_extra: 0.,
+            left_extra: 0.,
             screen_lines,
             columns,
         }
@@ -265,15 +291,48 @@ impl SizeInfo<f32> {
         self.screen_lines = cmp::max(self.screen_lines.saturating_sub(count), MIN_SCREEN_LINES);
     }
 
+    /// Reserve `px` pixels at the top of the window (for the chrome tab bar), removing the
+    /// equivalent whole rows from the grid and shifting it down.
+    #[inline]
+    pub fn reserve_top_px(&mut self, px: f32) {
+        self.top_extra = px;
+        if self.cell_height > 0. {
+            self.reserve_lines((px / self.cell_height).ceil() as usize);
+        }
+    }
+
+    /// Reserve `width` pixels at the left of the window (for the project sidebar), removing the
+    /// covered columns from the grid and shifting it right.
+    #[inline]
+    pub fn reserve_left_cols(&mut self, width: f32) {
+        self.left_extra = width;
+        let columns = (self.width - 2. * self.padding_x - self.left_extra) / self.cell_width;
+        self.columns = cmp::max(columns as usize, MIN_COLUMNS);
+    }
+
+    /// The vertical pixel offset at which the grid (and overlays) begin.
+    #[inline]
+    pub fn grid_top(&self) -> f32 {
+        self.padding_y + self.top_extra
+    }
+
+    /// The horizontal pixel offset at which the grid (and overlays) begin.
+    #[inline]
+    pub fn grid_left(&self) -> f32 {
+        self.padding_x + self.left_extra
+    }
+
     /// Check if coordinates are inside the terminal grid.
     ///
-    /// The padding, message bar or search are not counted as part of the grid.
+    /// The padding, top chrome, message bar or search are not counted as part of the grid.
     #[inline]
     pub fn contains_point(&self, x: usize, y: usize) -> bool {
-        x <= (self.padding_x + self.columns as f32 * self.cell_width) as usize
-            && x > self.padding_x as usize
-            && y <= (self.padding_y + self.screen_lines as f32 * self.cell_height) as usize
-            && y > self.padding_y as usize
+        let grid_top = self.grid_top();
+        let grid_left = self.grid_left();
+        x <= (grid_left + self.columns as f32 * self.cell_width) as usize
+            && x > grid_left as usize
+            && y <= (grid_top + self.screen_lines as f32 * self.cell_height) as usize
+            && y > grid_top as usize
     }
 
     /// Calculate padding to spread it evenly around the terminal content.
@@ -338,6 +397,59 @@ impl DisplayUpdate {
     }
 }
 
+/// A Claude Code session shown as a sub-row under the active project in the sidebar.
+///
+/// Only the label is needed for rendering; the click is resolved back to a session by its row
+/// index against the window's own session cache.
+pub struct ClaudeSessionRow {
+    /// Display label (first user prompt, or `(no prompt)`).
+    pub label: String,
+}
+
+/// Content needed to render the in-window tab bar.
+///
+/// The tab bar is only shown when a window hosts more than one tab.
+pub struct TabBarInfo {
+    /// Title of each tab in the active project, in order.
+    pub titles: Vec<String>,
+    /// Stable terminal id of each tab, in order (parallel to `titles`).
+    pub ids: Vec<u64>,
+    /// Index of the currently active tab within the active project.
+    pub active: usize,
+    /// Display name of each project, in order (shown in the left sidebar).
+    pub project_names: Vec<String>,
+    /// Index of the currently active project.
+    pub active_project: usize,
+    /// Claude Code sessions for the active project (newest first), shown as indented sub-rows.
+    pub project_sessions: Vec<ClaudeSessionRow>,
+}
+
+/// Actions produced by the egui chrome during a frame, drained and dispatched by the window.
+#[derive(Default)]
+pub struct ChromeActions {
+    /// Activate the tab with this terminal id.
+    pub select: Option<u64>,
+    /// Close the tab with this terminal id.
+    pub close: Option<u64>,
+    /// Create a new tab.
+    pub create: bool,
+    /// Copy the active terminal's selection.
+    pub copy: bool,
+    /// Paste the clipboard into the active terminal.
+    pub paste: bool,
+    /// Activate the project at this index.
+    pub select_project: Option<usize>,
+    /// Delete the project at this index (and all its tabs).
+    pub close_project: Option<usize>,
+    /// Open the folder picker to create a new project.
+    pub create_project: bool,
+    /// Open (resume) the active project's Claude session at this index into `project_sessions`.
+    pub open_claude_session: Option<usize>,
+    /// The chrome's reserved size (top bar height or sidebar width) changed; the terminal layout
+    /// must be recomputed.
+    pub layout_changed: bool,
+}
+
 /// The display wraps a window, font rasterizer, and GPU renderer.
 pub struct Display {
     pub window: Window,
@@ -397,6 +509,19 @@ pub struct Display {
 
     glyph_cache: GlyphCache,
     meter: Meter,
+
+    /// Native window chrome state: tab bar, project sidebar and context menu.
+    chrome: Chrome,
+    /// Glyph cache for the chrome, sized larger than the terminal font so the chrome is legible.
+    chrome_glyph_cache: GlyphCache,
+    /// Cell `(width, height)` in pixels of the chrome font, used to lay out and render the chrome.
+    chrome_cell_size: (f32, f32),
+    /// Chrome actions collected during the last frame, drained by the window.
+    chrome_actions: ChromeActions,
+    /// Physical-pixel height reserved at the top for the tab bar (0 when hidden).
+    chrome_bar_height: f32,
+    /// Physical-pixel width reserved on the left for the project sidebar (0 when hidden).
+    chrome_sidebar_width: f32,
 }
 
 impl Display {
@@ -405,6 +530,7 @@ impl Display {
         gl_context: NotCurrentContext,
         config: &UiConfig,
         _tabbed: bool,
+        _event_loop: &ActiveEventLoop,
     ) -> Result<Display, Error> {
         let raw_window_handle = window.raw_window_handle();
 
@@ -418,6 +544,12 @@ impl Display {
 
         let metrics = glyph_cache.font_metrics();
         let (cell_width, cell_height) = compute_cell_size(config, &metrics);
+
+        // A second, larger glyph cache for the window chrome so it isn't as small as terminal text.
+        let chrome_rasterizer = Rasterizer::new()?;
+        let chrome_font = font.clone().with_size(font_size.scale(chrome::CHROME_SCALE));
+        let mut chrome_glyph_cache = GlyphCache::new(chrome_rasterizer, &chrome_font)?;
+        let chrome_cell_size = chrome_cell_size(&chrome_glyph_cache.font_metrics());
 
         // Resize the window to account for the user configured size.
         if let Some(dimensions) = config.window.dimensions() {
@@ -442,6 +574,10 @@ impl Display {
         debug!("Filling glyph cache with common glyphs");
         renderer.with_loader(|mut api| {
             glyph_cache.reset_glyph_cache(&mut api);
+        });
+        // Add the chrome font's common glyphs into the shared atlas (without clearing it).
+        renderer.with_loader(|mut api| {
+            chrome_glyph_cache.load_common_glyphs(&mut api);
         });
 
         let padding = config.window.padding(window.scale_factor as f32);
@@ -515,6 +651,12 @@ impl Display {
         }
 
         Ok(Self {
+            chrome: Chrome::new(),
+            chrome_glyph_cache,
+            chrome_cell_size,
+            chrome_actions: ChromeActions::default(),
+            chrome_bar_height: 0.,
+            chrome_sidebar_width: 0.,
             context: ManuallyDrop::new(context),
             visual_bell: VisualBell::from(&config.bell),
             renderer: ManuallyDrop::new(renderer),
@@ -540,6 +682,11 @@ impl Display {
             meter: Default::default(),
             ime: Default::default(),
         })
+    }
+
+    /// Open the right-click context menu anchored at the given window pixel position.
+    pub fn open_context_menu(&mut self, x: usize, y: usize) {
+        self.chrome.context_menu = Some((x as f32, y as f32));
     }
 
     #[inline]
@@ -638,9 +785,15 @@ impl Display {
 
     /// Reset glyph cache.
     fn reset_glyph_cache(&mut self) {
+        // Clears the shared atlas and reloads the terminal font's common glyphs.
         let cache = &mut self.glyph_cache;
         self.renderer.with_loader(|mut api| {
             cache.reset_glyph_cache(&mut api);
+        });
+        // Re-add the chrome font's glyphs into the now-cleared atlas (without clearing it again).
+        let chrome_cache = &mut self.chrome_glyph_cache;
+        self.renderer.with_loader(|mut api| {
+            chrome_cache.reload(&mut api);
         });
     }
 
@@ -674,6 +827,11 @@ impl Display {
             cell_width = cell_dimensions.0;
             cell_height = cell_dimensions.1;
 
+            // Keep the chrome font scaled relative to the new terminal font size.
+            let chrome_font = font.clone().with_size(font.size().scale(chrome::CHROME_SCALE));
+            let _ = self.chrome_glyph_cache.update_font_size(&chrome_font);
+            self.chrome_cell_size = chrome_cell_size(&self.chrome_glyph_cache.font_metrics());
+
             info!("Cell size: {cell_width} x {cell_height}");
 
             // Mark entire terminal as damaged since glyph size could change without cell size
@@ -705,6 +863,12 @@ impl Display {
         let search_lines = usize::from(search_active);
         new_size.reserve_lines(message_bar_lines + search_lines);
 
+        // Reserve space at the top for the tab bar.
+        new_size.reserve_top_px(self.chrome_bar_height);
+
+        // Reserve space at the left for the project sidebar.
+        new_size.reserve_left_cols(self.chrome_sidebar_width);
+
         // Update resize increments.
         if config.window.resize_increments {
             self.window.set_resize_increments(PhysicalSize::new(cell_width, cell_height));
@@ -732,6 +896,9 @@ impl Display {
 
             // Clear focused search match.
             search_state.clear_focused_match();
+
+            // The context menu's anchor is tied to the old layout; close it on resize.
+            self.chrome.context_menu = None;
         }
         self.size_info = new_size;
     }
@@ -779,6 +946,7 @@ impl Display {
         message_buffer: &MessageBuffer,
         config: &UiConfig,
         search_state: &mut SearchState,
+        tab_bar: &TabBarInfo,
     ) {
         // Collect renderable content before the terminal is dropped.
         let mut content = RenderableContent::new(config, self, &terminal, search_state);
@@ -1026,6 +1194,9 @@ impl Display {
             self.highlight_damage(&mut rects);
             self.renderer.draw_rects(&self.size_info, &metrics, rects);
         }
+
+        // Render the native chrome (tab bar, sidebar, context menu) over the terminal.
+        self.draw_chrome(tab_bar);
 
         // Clearing debug highlights from the previous frame requires full redraw.
         self.swap_buffers();
@@ -1325,6 +1496,122 @@ impl Display {
         );
     }
 
+    /// Offer a winit window event to the native chrome. Returns whether the chrome consumed it
+    /// (in which case it must not also reach the terminal).
+    pub fn handle_chrome_event(&mut self, event: &winit::event::WindowEvent) -> bool {
+        use winit::event::{ElementState, MouseButton, WindowEvent};
+        use winit::keyboard::{Key, NamedKey};
+
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                if self.chrome.set_mouse(position.x as f32, position.y as f32) {
+                    self.pending_update.dirty = true;
+                }
+                // Never consume movement; the terminal still tracks the cursor.
+                false
+            },
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let Some(hit) = self.chrome.hit_mouse() {
+                    self.apply_chrome_hit(hit);
+                    self.chrome.context_menu = None;
+                    self.pending_update.dirty = true;
+                    return true;
+                }
+                // Dismiss an open menu when clicking away, consuming the click so it doesn't also
+                // act on the terminal.
+                if self.chrome.context_menu.take().is_some() {
+                    self.pending_update.dirty = true;
+                    return true;
+                }
+                // Swallow clicks that land on a chrome surface but not a specific control.
+                let (x, y) = self.chrome.last_mouse();
+                self.chrome.in_region(x, y)
+            },
+            WindowEvent::KeyboardInput { event: key_event, .. }
+                if key_event.state == ElementState::Pressed
+                    && key_event.logical_key == Key::Named(NamedKey::Escape) =>
+            {
+                // Close an open menu on Escape; only consume the key when a menu was actually open.
+                if self.chrome.context_menu.take().is_some() {
+                    self.pending_update.dirty = true;
+                    true
+                } else {
+                    false
+                }
+            },
+            _ => false,
+        }
+    }
+
+    /// Translate a chrome hit into a queued [`ChromeActions`] entry.
+    fn apply_chrome_hit(&mut self, hit: Hit) {
+        match hit {
+            Hit::SelectTab(id) => self.chrome_actions.select = Some(id),
+            Hit::CloseTab(id) => self.chrome_actions.close = Some(id),
+            Hit::CreateTab => self.chrome_actions.create = true,
+            Hit::SelectProject(i) => self.chrome_actions.select_project = Some(i),
+            Hit::CloseProject(i) => self.chrome_actions.close_project = Some(i),
+            Hit::CreateProject => self.chrome_actions.create_project = true,
+            Hit::OpenClaudeSession(i) => self.chrome_actions.open_claude_session = Some(i),
+            Hit::Copy => self.chrome_actions.copy = true,
+            Hit::Paste => self.chrome_actions.paste = true,
+        }
+    }
+
+    /// Drain the chrome actions collected during the last frame.
+    pub fn take_chrome_actions(&mut self) -> ChromeActions {
+        std::mem::take(&mut self.chrome_actions)
+    }
+
+    /// Toggle the project sidebar's visibility and trigger a relayout.
+    pub fn toggle_sidebar(&mut self) {
+        self.chrome.toggle_sidebar();
+        self.pending_update.dirty = true;
+    }
+
+    /// Render the native chrome (tab bar, sidebar, context menu) over the terminal grid.
+    fn draw_chrome(&mut self, tab_bar: &TabBarInfo) {
+        let (chrome_cw, chrome_ch) = self.chrome_cell_size;
+        let win_w = self.size_info.width();
+        let win_h = self.size_info.height();
+
+        let draw = self.chrome.layout(tab_bar, chrome_cw, chrome_ch, win_w, win_h);
+        let metrics = self.glyph_cache.font_metrics();
+
+        if !draw.rects.is_empty() {
+            self.renderer.draw_chrome_rects(&self.size_info, &metrics, draw.rects);
+        }
+        if !draw.cells.is_empty() {
+            // Chrome cells carry absolute pixel positions, so render them with a 1×1-pixel cell
+            // grid; glyphs are still rasterized from the larger chrome glyph cache.
+            let chrome_size = SizeInfo::new(win_w, win_h, 1., 1., 0., 0., false);
+            self.renderer.draw_chrome_cells(
+                &self.size_info,
+                &chrome_size,
+                &mut self.chrome_glyph_cache,
+                draw.cells.into_iter(),
+            );
+        }
+
+        // Feed the reserved tab-bar height back into the layout so the terminal sits below the bar.
+        if (draw.bar_height - self.chrome_bar_height).abs() > f32::EPSILON {
+            self.chrome_bar_height = draw.bar_height;
+            self.chrome_actions.layout_changed = true;
+            self.pending_update.dirty = true;
+        }
+
+        // Feed the reserved sidebar width back into the layout so the terminal sits to its right.
+        if (draw.sidebar_width - self.chrome_sidebar_width).abs() > f32::EPSILON {
+            self.chrome_sidebar_width = draw.sidebar_width;
+            self.chrome_actions.layout_changed = true;
+            self.pending_update.dirty = true;
+        }
+    }
+
     /// Draw render timer.
     #[inline(never)]
     fn draw_render_timer(&mut self, config: &UiConfig) {
@@ -1601,10 +1888,12 @@ impl FrameTimer {
     }
 }
 
-/// Calculate the cell dimensions based on font metrics.
-///
-/// This will return a tuple of the cell width and height.
-#[inline]
+/// Cell `(width, height)` in pixels for the chrome font, derived directly from its metrics (the
+/// terminal's per-cell offsets don't apply to the chrome).
+fn chrome_cell_size(metrics: &crossfont::Metrics) -> (f32, f32) {
+    (metrics.average_advance.floor().max(1.) as f32, metrics.line_height.floor().max(1.) as f32)
+}
+
 fn compute_cell_size(config: &UiConfig, metrics: &crossfont::Metrics) -> (f32, f32) {
     let offset_x = f64::from(config.font.offset.x);
     let offset_y = f64::from(config.font.offset.y);

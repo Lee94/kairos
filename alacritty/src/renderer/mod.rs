@@ -264,6 +264,76 @@ impl Renderer {
         }
     }
 
+    /// Draw chrome rectangles in absolute window pixels (without the grid's chrome offset), used
+    /// to paint the tab bar, sidebar and context-menu surfaces over the reserved chrome regions.
+    pub fn draw_chrome_rects(
+        &mut self,
+        size_info: &SizeInfo,
+        metrics: &Metrics,
+        rects: Vec<RenderRect>,
+    ) {
+        if rects.is_empty() {
+            return;
+        }
+
+        unsafe {
+            gl::Viewport(0, 0, size_info.width() as i32, size_info.height() as i32);
+            gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::SRC_ALPHA, gl::ONE);
+        }
+
+        self.rect_renderer.draw_absolute(size_info, metrics, rects);
+
+        unsafe {
+            // Restore the grid's blend function and viewport.
+            gl::BlendFunc(gl::SRC1_COLOR, gl::ONE_MINUS_SRC1_COLOR);
+            self.set_viewport(size_info);
+        }
+    }
+
+    /// Draw chrome text cells on a window-origin cell grid: each cell `(col, row)` is placed at
+    /// window pixel `(col * cell_width, row * cell_height)`, outside the grid's reserved area.
+    ///
+    /// `cell_size_info` carries the chrome cell dimensions (a larger font) and is used for the cell
+    /// metrics and glyph cache, while `size_info` (the real terminal layout) drives the full-window
+    /// projection and is restored — along with the grid viewport — once the pass completes.
+    pub fn draw_chrome_cells<I: Iterator<Item = RenderableCell>>(
+        &mut self,
+        size_info: &SizeInfo,
+        cell_size_info: &SizeInfo,
+        glyph_cache: &mut GlyphCache,
+        cells: I,
+    ) {
+        unsafe {
+            gl::Viewport(0, 0, size_info.width() as i32, size_info.height() as i32);
+        }
+
+        // Map cell pixels directly onto the full window (top-left origin, y down).
+        let projection = [-1.0, 1.0, 2.0 / size_info.width(), -2.0 / size_info.height()];
+        self.set_text_projection(projection);
+
+        self.draw_cells(cell_size_info, glyph_cache, cells);
+
+        // Restore the grid projection and viewport for the next frame.
+        self.restore_text_projection(size_info);
+        self.set_viewport(size_info);
+    }
+
+    /// Override the text shader's projection uniform (used to draw chrome on a window-origin grid).
+    fn set_text_projection(&self, projection: [f32; 4]) {
+        match &self.text_renderer {
+            TextRendererProvider::Gles2(renderer) => renderer.set_projection(projection),
+            TextRendererProvider::Glsl3(renderer) => renderer.set_projection(projection),
+        }
+    }
+
+    /// Restore the text shader's projection to the grid's (chrome-offset) projection.
+    fn restore_text_projection(&self, size_info: &SizeInfo) {
+        match &self.text_renderer {
+            TextRendererProvider::Gles2(renderer) => renderer.resize(size_info),
+            TextRendererProvider::Glsl3(renderer) => renderer.resize(size_info),
+        }
+    }
+
     /// Fill the window with `color` and `alpha`.
     pub fn clear(&self, color: Rgb, alpha: f32) {
         unsafe {
@@ -330,11 +400,13 @@ impl Renderer {
     #[inline]
     pub fn set_viewport(&self, size: &SizeInfo) {
         unsafe {
+            // Reduce the height by `top_extra` (reserves the top egui chrome) and shift the left
+            // origin by `left_extra` while shrinking the width (reserves the left project sidebar).
             gl::Viewport(
-                size.padding_x() as i32,
+                size.padding_x() as i32 + size.left_extra() as i32,
                 size.padding_y() as i32,
-                size.width() as i32 - 2 * size.padding_x() as i32,
-                size.height() as i32 - 2 * size.padding_y() as i32,
+                size.width() as i32 - 2 * size.padding_x() as i32 - size.left_extra() as i32,
+                size.height() as i32 - 2 * size.padding_y() as i32 - size.top_extra() as i32,
             );
         }
     }
