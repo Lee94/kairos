@@ -11,7 +11,7 @@ packages:
   - x11/libxkbcommon
 
 sources:
-  - https://github.com/alacritty/alacritty
+  - https://github.com/kairos/kairos
 
 environment:
   PATH: /home/build/.cargo/bin:/bin:/usr/bin:/usr/local/bin
@@ -20,21 +20,21 @@ tasks:
   - rustup: |
       curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable --profile minimal
   - test: |
-      cd alacritty
+      cd kairos
       cargo test
   - oldstable: |
-      cd alacritty
+      cd kairos
       oldstable=$(cat Cargo.toml | grep "rust-version" | sed 's/.*"\(.*\)".*/\1/')
       rustup toolchain install --profile minimal $oldstable
       rustup default $oldstable
       cargo test
   - clippy: |
-      cd alacritty
+      cd kairos
       rustup component add clippy
       cargo clippy --all-targets
   - feature-wayland: |
-      cd alacritty/alacritty
+      cd kairos/kairos
       RUSTFLAGS="-D warnings" cargo test --no-default-features --features=wayland
   - feature-x11: |
-      cd alacritty/alacritty
+      cd kairos/kairos
       RUSTFLAGS="-D warnings" cargo test --no-default-features --features=x11

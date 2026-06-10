@@ -1,19 +1,19 @@
 # Changelog
 
-All notable changes to Alacritty are documented in this file.
+All notable changes to Kairos are documented in this file.
 The sections should follow the order `Packaging`, `Added`, `Changed`, `Fixed` and `Removed`.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-Notable changes to the `alacritty_terminal` crate are documented in its
-[CHANGELOG](./alacritty_terminal/CHANGELOG.md).
+Notable changes to the `kairos_terminal` crate are documented in its
+[CHANGELOG](./kairos_terminal/CHANGELOG.md).
 
 ## 0.18.0-dev
 
 ### Packaging
 
-- Fixed `alacritty-escapes(7)` manpage missing from macOS install
-- Added the `Open Alacritty here` entry to the right-click context menu for folders on Windows
+- Fixed `kairos-escapes(7)` manpage missing from macOS install
+- Added the `Open Kairos here` entry to the right-click context menu for folders on Windows
 
 ### Fixed
 
@@ -25,7 +25,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 ### Packaging
 
 - Fixed invalid logo SVG attributes
-- New `alacritty-escapes(7)` manpage
+- New `kairos-escapes(7)` manpage
 - Removed broken flash capability from terminfo
 
 ### Added
@@ -64,10 +64,10 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 ### Added
 
 - Vi motions `*`, `#`, `{`, and `}`
-- IPC config retrieval using `alacritty msg get-config`
+- IPC config retrieval using `kairos msg get-config`
 - Multi-sequence touch zoom sequences
 - Vi action `Y` keybind, yank to the end of line
-- Add `/etc/alacritty/alacritty.toml` fallback for system wide configuration
+- Add `/etc/kairos/kairos.toml` fallback for system wide configuration
 - Unicode 17 support
 
 ### Changed
@@ -106,9 +106,9 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Added
 
-- Config option `window.level = "AlwaysOnTop"` to force Alacritty to always be the toplevel window
+- Config option `window.level = "AlwaysOnTop"` to force Kairos to always be the toplevel window
 - Escape sequence to move cursor forward tabs ( CSI Ps I )
-- Pass activation token in `alacritty msg create-window` on Wayland/X11
+- Pass activation token in `kairos msg create-window` on Wayland/X11
 
 ### Changed
 
@@ -121,7 +121,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Mouse/Vi cursor hint highlighting broken on the terminal cursor line
 - Hint launcher opening arbitrary text, when terminal content changed while opening
 - `SemanticRight`/`SemanticLeft` vi motions breaking with wide semantic escape characters
-- `alacritty migrate` crashing with recursive toml imports
+- `kairos migrate` crashing with recursive toml imports
 - Migrating nonexistent toml import breaking the entire migration
 - First daemon mode window ignoring window options passed through CLI
 - Report of Enter/Tab/Backspace in kitty keyboard's report event types mode
@@ -137,8 +137,8 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 ### Added
 
 - Support relative path imports from config files
-- `alacritty migrate` support for TOML configuration changes
-- Headless mode using `alacritty --daemon`
+- `kairos migrate` support for TOML configuration changes
+- Headless mode using `kairos --daemon`
 
 ### Changed
 
@@ -167,7 +167,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Cursor color requests with default cursor colors
 - Fullwidth semantic escape characters
 - Windows app icon now displays properly in old alt+tab on Windows
-- Alacritty not being properly activated with startup notify
+- Kairos not being properly activated with startup notify
 - Invalid URL highlights after terminal scrolling
 - Hollow block cursor not spanning multiple chars being edited inside the IME preview
 - Vi inline search only working for direct key input without modifiers
@@ -188,7 +188,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Scrolling content upwards moving lines into history when it shouldn't
 - Sticky keys not working sometimes on X11
 - Modifiers occasionally getting desynced on X11
-- Autokey no longer working with alacritty on X11
+- Autokey no longer working with kairos on X11
 - Freeze when moving window between monitors on Xfwm
 - Mouse cursor not changing on Wayland when cursor theme uses legacy cursor icon names
 - Config keys are available under proper names
@@ -210,11 +210,11 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Changed
 
-- `alacritty migrate` will ignore null values in yaml instead of erroring out
+- `kairos migrate` will ignore null values in yaml instead of erroring out
 
 ### Fixed
 
-- `alacritty migrate` failing with nonexistent imports
+- `kairos migrate` failing with nonexistent imports
 - `Alt` bindings requiring composed key rather than pre-composed one on macOS
 - `Alt + Control` bindings not working on Windows
 - `chars = "\u000A"` action in bindings inserting `\n`
@@ -250,7 +250,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Debug option `prefer_egl` to prioritize EGL over other display APIs
 - Inline vi-mode search using `f`/`F`/`t`/`T`
 - `window.blur` config option to request blur for transparent windows
-- `--option` argument for `alacritty msg create-window`
+- `--option` argument for `kairos msg create-window`
 - Support for `DECRQM`/`DECRPM` escape sequences
 - Support for kitty's keyboard protocol
 
@@ -259,7 +259,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Mode-specific bindings can now be bound in any mode for easier macros
 - `--help` output is more compact now and uses more neutral palette
 - Configuration file now uses TOML instead of YAML
-    Run `alacritty migrate` to automatically convert all configuration files
+    Run `kairos migrate` to automatically convert all configuration files
 - Deprecated config option `draw_bold_text_with_bright_colors`, use
     `colors.draw_bold_text_with_bright_colors`
 - Deprecated config option `key_bindings`, use `keyboard.bindings`
@@ -294,7 +294,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Copy/Paste being truncated to 64KiB on Wayland
 - X11 clipboard lagging behind sometimes
 - High wakeup count on Wayland due to clipboard polling
-- Blocking paste freezing alacritty on Wayland
+- Blocking paste freezing kairos on Wayland
 - `Command` modifier persisting after `Cmd + Tab` on macOS
 - Crash on exit when using NVIDIA binary drivers on Wayland
 - `window.startup_mode` applied to window again when creating new tab
@@ -401,8 +401,8 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 ### Packaging
 
 - Minimum Rust version has been bumped to 1.57.0
-- Renamed `io.alacritty.Alacritty.appdata.xml` to `org.alacritty.Alacritty.appdata.xml`
-- Renamed `io.alacritty` to `org.alacritty` for `Alacritty.app`
+- Renamed `io.kairos.Kairos.appdata.xml` to `org.kairos.Kairos.appdata.xml`
+- Renamed `io.kairos` to `org.kairos` for `Kairos.app`
 
 ### Added
 
@@ -428,7 +428,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - `SpawnNewInstance` no longer inherits initial `--command`
 - Blinking cursor will timeout after `5` seconds by default
 - Deprecated `colors.search.bar`, use `colors.footer_bar` instead
-- On macOS, Alacritty now reads `AppleFontSmoothing` from user defaults to control font smoothing
+- On macOS, Kairos now reads `AppleFontSmoothing` from user defaults to control font smoothing
 - Warn when either `columns` or `lines` is non-zero, but not both
 - Client side decorations should have proper text rendering now on Wayland
 - Config option `window.gtk_theme_variant`, you should use `window.decorations_theme_variant` instead
@@ -452,10 +452,10 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Character mappings in the DEC special graphics character set (line drawing)
 - Window flickering on resize on Wayland
 - Unnecessary config reload when using `/dev/null` as a config file
-- Windows `Open Alacritty Here` on root of drive displaying error
+- Windows `Open Kairos Here` on root of drive displaying error
 - On macOS, `font.use_thin_strokes` did not work since Big Sur
 - On macOS, trying to load a disabled font would crash
-- On macOS, Alacritty sessions did not appear in the list of tty sessions for `w` and `who`
+- On macOS, Kairos sessions did not appear in the list of tty sessions for `w` and `who`
 - Cursor not hiding on GNOME Wayland
 - Font having different scale factor after monitor powering off/on on X11
 - Viewport not updating after opening a new tabbed window on macOS
@@ -494,13 +494,13 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Packaging
 
-- New `extra/alacritty-msg.man` manpage for the `alacritty msg` subcommand
+- New `extra/kairos-msg.man` manpage for the `kairos msg` subcommand
 - Minimum Rust version has been bumped to 1.53.0
 
 ### Added
 
 - Option `colors.transparent_background_colors` to allow applying opacity to all background colors
-- Support for running multiple windows from a single Alacritty instance (see docs/features.md)
+- Support for running multiple windows from a single Kairos instance (see docs/features.md)
 - Urgency support on Wayland via `xdg_activation_v1`
 
 ### Changed
@@ -560,7 +560,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Crash when moving fullwidth characters off the side of the terminal in insert mode
 - Broken bitmap font rendering with FreeType 2.11+
 - Crash with non-utf8 font paths on Linux
-- Newly installed fonts not rendering until Alacritty restart
+- Newly installed fonts not rendering until Kairos restart
 
 ## 0.8.0
 
@@ -578,7 +578,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - IME composition preview not appearing on Windows
 - Synchronized terminal updates using `DCS = 1 s ST`/`DCS = 2 s ST`
 - Regex terminal hints ([see features.md](./docs/features.md#hints))
-- macOS keybinding (cmd+alt+H) hiding all windows other than Alacritty
+- macOS keybinding (cmd+alt+H) hiding all windows other than Kairos
 - Support for `magnet` URLs
 
 ### Changed
@@ -589,7 +589,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Fixed
 
-- Alacritty failing to start on X11 with invalid DPI reported by XRandr
+- Kairos failing to start on X11 with invalid DPI reported by XRandr
 - Text selected after search without any match
 - Incorrect vi cursor position after leaving search
 - Clicking on URLs on Windows incorrectly opens File Explorer
@@ -646,7 +646,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 - Wide characters sometimes being cut off
 - Preserve vi mode across terminal `reset`
-- Escapes `CSI Ps b` and `CSI Ps Z` with large parameters locking up Alacritty
+- Escapes `CSI Ps b` and `CSI Ps Z` with large parameters locking up Kairos
 - Dimming colors which use the indexed `CSI 38 : 5 : Ps m` notation
 - Slow rendering performance with a lot of cells with underline/strikeout attributes
 - Performance of scrolling regions with offset from the bottom
@@ -656,10 +656,10 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Window not being completely opaque on Windows
 - Window being always on top during alt-tab on Windows
 - Cursor position not reported to apps when mouse is moved with button held outside of window
-- No live config update when starting Alacritty with a broken configuration file
+- No live config update when starting Kairos with a broken configuration file
 - PTY not drained to the end with the `--hold` flag enabled
 - High CPU usage on BSD with live config reload enabled
-- Alacritty not discarding invalid escape sequences starting with ESC
+- Kairos not discarding invalid escape sequences starting with ESC
 - Crash due to clipboard not being properly released on Wayland
 - Shadow artifacts when resizing transparent windows on macOS
 - Missing glyph symbols not being rendered for missing glyphs on macOS and Windows
@@ -688,7 +688,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 - Minimum Rust version has been bumped to 1.43.0
 - The snapcraft.yaml file has been removed
-- Updated `setab`/`setaf` capabilities in `alacritty-direct` to use colons
+- Updated `setab`/`setaf` capabilities in `kairos-direct` to use colons
 - WinPTY is now enabled only when targeting MSVC
 - Deprecated the WinPTY backend feature, disabling it by default
 
@@ -819,7 +819,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Cursor color escape ignored when its color is set to inverted in the config
 - Fontconfig's `autohint` and `hinting` options being ignored
 - Ignoring of default FreeType properties
-- Alacritty crashing at startup when the configured font does not exist
+- Kairos crashing at startup when the configured font does not exist
 - Font size rounding error
 - Opening URLs while search is active
 
@@ -851,7 +851,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 - Minimum Rust version has been bumped to 1.37.0
 - Added Rust features `x11` and `wayland` to pick backends, with both enabled by default
-- Capitalized the Alacritty.desktop file
+- Capitalized the Kairos.desktop file
 
 ### Added
 
@@ -874,12 +874,12 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Semantic selection stopping at full-width glyphs
 - Full-width glyphs cut off in last column
 - Crash when starting on some X11 systems
-- Font size resetting when Alacritty is moved between screens
+- Font size resetting when Kairos is moved between screens
 - Limited payload length in clipboard escape (used for Tmux copy/paste)
-- Alacritty not ignoring keyboard events for changing WM focus on X11
+- Kairos not ignoring keyboard events for changing WM focus on X11
 - Regression which added a UNC path prefix to the working directory on Windows
 - CLI parameters discarded when config is reload
-- Blurred icons in KDE task switcher (alacritty.ico is now high-res)
+- Blurred icons in KDE task switcher (kairos.ico is now high-res)
 - Consecutive builds failing on macOS due to preexisting `/Application` symlink
 - Block selection starting from first column after beginning leaves the scrollback
 - Incorrect selection status of the first cell when selection is off screen
@@ -955,7 +955,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Minimize on windows causing layout issues
 - Performance bottleneck when clearing colored rows
 - Vague startup crash messages on Windows with WinPTY backend
-- Deadlock on Windows when closing Alacritty using the title bar "X" button (ConPTY backend)
+- Deadlock on Windows when closing Kairos using the title bar "X" button (ConPTY backend)
 - Crash on `clear` when scrolled up in history
 - Entire screen getting underlined/stroke out when running `clear`
 - Slow startup on some Wayland compositors
@@ -974,8 +974,8 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 ### Packaging
 
 - Minimum Rust version has been bumped to 1.36.0
-- Config is not generated anymore, please consider distributing the alacritty.yml as documentation
-- Removed Alacritty terminfo from .deb in favor of ncurses provided one
+- Config is not generated anymore, please consider distributing the kairos.yml as documentation
+- Removed Kairos terminfo from .deb in favor of ncurses provided one
 
 ### Added
 
@@ -989,10 +989,10 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Terminal escape bindings with combined modifiers
 - Bindings for ScrollToTop and ScrollToBottom actions
 - `ReceiveChar` key binding action to insert the key's text character
-- New CLI flag `--hold` for keeping Alacritty opened after its child process exits
+- New CLI flag `--hold` for keeping Kairos opened after its child process exits
 - Escape sequence to save and restore window title from stack
 - Alternate scroll escape sequence (`CSI ? 1007 h` / `CSI ? 1007 l`)
-- Print name of launch command if Alacritty failed to execute it
+- Print name of launch command if Kairos failed to execute it
 - Live reload font settings from config
 - UTF-8 mouse mode escape sequence (`CSI ? 1005 h` / `CSI ? 1005 l`)
 - Escape for reading clipboard (`OSC 52 ; <s / p / c> ; ? BEL`)
@@ -1005,14 +1005,14 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Fixed
 
-- GUI programs launched by Alacritty starting in the background on X11
+- GUI programs launched by Kairos starting in the background on X11
 - Text Cursor position when scrolling
-- Performance issues while resizing Alacritty
+- Performance issues while resizing Kairos
 - First unfullscreen action ignored on window launched in fullscreen mode
 - The window is now filled with the background color before displaying
 - Cells sometimes not getting cleared correctly
 - X11 clipboard hanging when mime type is set
-- On macOS, Alacritty will now fallback to Menlo if a font specified in the config cannot be loaded
+- On macOS, Kairos will now fallback to Menlo if a font specified in the config cannot be loaded
 - Debug ref tests are now written to disk regardless of shutdown method
 - Cursor color setting with escape sequence
 - Override default bindings with subset terminal mode match
@@ -1032,7 +1032,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Skipping redraws on PTY update
 - Not redrawing while resizing on Windows/macOS
 - Decorations `none` launching an invisible window on Windows
-- Alacritty turning transparent when opening another window on macOS with chunkwm
+- Kairos turning transparent when opening another window on macOS with chunkwm
 - Startup mode `Maximized` having no effect on Windows
 - Inserting Emojis using `Super+.` or compose sequences on Windows
 - Change mouse cursor depending on mode with Wayland
@@ -1063,9 +1063,9 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Packaging
 
-- Add appstream metadata, located at /extra/linux/io.alacritty.Alacritty.xml
+- Add appstream metadata, located at /extra/linux/io.kairos.Kairos.xml
 - The xclip dependency has been removed
-- On macOS, Alacritty now requests NSSystemAdministrationUsageDescription to
+- On macOS, Kairos now requests NSSystemAdministrationUsageDescription to
    avoid permission failures
 - Minimum Rust version has been bumped to 1.32.0
 
@@ -1076,7 +1076,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
     fullscreen without occupying another space
 - A new window option `window.startup_mode` which controls how the window is created
 - `_NET_WM_ICON` property is set on X11 now, allowing for WMs to show icons in titlebars
-- Current Git commit hash to `alacritty --version`
+- Current Git commit hash to `kairos --version`
 - Config options `window.title` and `window.class`
 - Config option `working_directory`
 - Config group `debug` with the options `debug.log_level`, `debug.print_events`
@@ -1087,7 +1087,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Changed
 
-- On Windows, Alacritty will now use the native DirectWrite font API
+- On Windows, Kairos will now use the native DirectWrite font API
 - The `start_maximized` window option is now `startup_mode: Maximized`
 - Cells with identical foreground and background will now show their text upon selection/inversion
 - Default Window padding to 0x0
@@ -1132,7 +1132,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Changed
 
-- Alacritty now has a fixed minimum supported Rust version of 1.31.0
+- Kairos now has a fixed minimum supported Rust version of 1.31.0
 
 ### Fixed
 
@@ -1150,8 +1150,8 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Packaging
 
-- On Linux, the .desktop file now uses `Alacritty` as icon name, which can be
-    found at `extra/logo/alacritty-term.svg`
+- On Linux, the .desktop file now uses `Kairos` as icon name, which can be
+    found at `extra/logo/kairos-term.svg`
 
 ### Added
 
@@ -1161,7 +1161,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Ability to specify starting position with the `--position` flag
 - New configuration field `window.position` allows specifying the starting position
 - Added the ability to change the selection color
-- Text will reflow instead of truncating when resizing Alacritty
+- Text will reflow instead of truncating when resizing Kairos
 - Underline text and change cursor when hovering over URLs with required modifiers pressed
 
 ### Changed
@@ -1172,8 +1172,8 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Fixed
 
-- Fix panic which could occur when quitting Alacritty on Windows if using the Conpty backend
-- Automatic copying of selection to clipboard when mouse is released outside of Alacritty
+- Fix panic which could occur when quitting Kairos on Windows if using the Conpty backend
+- Automatic copying of selection to clipboard when mouse is released outside of Kairos
 - Scrollback history live reload only working when shrinking lines
 - Crash when decreasing scrollback history in config while scrolled in history
 - Resetting the terminal while in the alt screen will no longer disable scrollback
@@ -1184,7 +1184,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Windows: Conpty backend could close immediately on startup in certain situations
 - FreeBSD: SpawnNewInstance will now open new instances in the shell's current
     working directory as long as linprocfs(5) is mounted on `/compat/linux/proc`
-- Fix lingering Alacritty window after child process has exited
+- Fix lingering Kairos window after child process has exited
 - Growing the terminal while scrolled up will no longer move the content down
 - Support for alternate keyboard layouts on macOS
 - Slow startup time on some X11 systems
@@ -1205,14 +1205,14 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Fixed
 
-- Incorrect font spacing after moving Alacritty between displays
+- Incorrect font spacing after moving Kairos between displays
 
 ## Version 0.2.8
 
 ### Added
 
-- Window class on Wayland is set to `Alacritty` by default
-- Log file location is stored in the `ALACRITTY_LOG` environment variable
+- Window class on Wayland is set to `Kairos` by default
+- Log file location is stored in the `KAIROS_LOG` environment variable
 - Close button has been added to the error/warning messages
 
 ### Changed
@@ -1234,7 +1234,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Corrected the `window.decorations` config documentation for macOS
 - Fix IME position on HiDPI displays
 - URLs not opening while terminal is scrolled
-- Reliably remove log file when Alacritty is closed and persistent logging is disabled
+- Reliably remove log file when Kairos is closed and persistent logging is disabled
 - Remove selections when clearing the screen partially (scrolling horizontally in less)
 - Crash/Freeze when shrinking the font size too far
 - Documentation of the `--dimensions` flag have been updated to display the correct default
@@ -1247,7 +1247,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Fixed
 
-- Crash when trying to start Alacritty on Windows
+- Crash when trying to start Kairos on Windows
 
 ## Version 0.2.6
 
@@ -1263,14 +1263,14 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 - Replaced `Command` with `Super` in the Linux and Windows config documentation
 - Prevent semantic and line selection from starting with the right or middle mouse button
-- Prevent Alacritty from crashing when started on a system without any free space
-- Resolve issue with high CPU usage after moving Alacritty between displays
+- Prevent Kairos from crashing when started on a system without any free space
+- Resolve issue with high CPU usage after moving Kairos between displays
 - Characters will no longer be deleted when using ncurses with the hard tab optimization
 - Crash on non-linux operating systems when using the `SpawnNewInstance` action
 
 ### Removed
 
-- Windows and macOS configuration files (`alacritty.yml` is now platform independent)
+- Windows and macOS configuration files (`kairos.yml` is now platform independent)
 
 ## Version 0.2.5
 
@@ -1280,25 +1280,25 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Crashes on Windows are now also reported with a popup in addition to stderr
 - Windows: New configuration field `enable_experimental_conpty_backend` which enables support
     for the Pseudoconsole API (ConPTY) added in Windows 10 October 2018 (1809) update
-- New mouse and key action `SpawnNewInstance` for launching another instance of Alacritty
+- New mouse and key action `SpawnNewInstance` for launching another instance of Kairos
 
 ### Changed
 
 - Log messages are now consistent in style, and some have been removed
-- Windows configuration location has been moved from %USERPROFILE%\alacritty.yml
-    to %APPDATA%\alacritty\alacritty.yml
+- Windows configuration location has been moved from %USERPROFILE%\kairos.yml
+    to %APPDATA%\kairos\kairos.yml
 - Windows default shell is now PowerShell instead of cmd
 - URL schemes have been limited to http, https, mailto, news, file, git, ssh and ftp
 
 ### Fixed
 
 - Fix color issue in ncurses programs by updating terminfo pairs from 0x10000 to 0x7FFF
-- Fix panic after quitting Alacritty on macOS
+- Fix panic after quitting Kairos on macOS
 - Tabs are no longer replaced by spaces when copying them to the clipboard
 - Alt modifier is no longer sent separately from the modified key
 - Various Windows issues, like color support and performance, through the new ConPTY
 - Fixed rendering non default mouse cursors in terminal mouse mode (linux)
-- Fix the `Copy` `mouse_bindings` action ([#1963](https://github.com/alacritty/alacritty/issues/1963))
+- Fix the `Copy` `mouse_bindings` action ([#1963](https://github.com/kairos/kairos/issues/1963))
 - URLs are only launched when left-clicking
 - Removal of extra characters (like `,`) at the end of URLs has been improved
 - Single quotes (`'`) are removed from URLs when there is no matching opening quote
@@ -1309,24 +1309,24 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 ### Added
 
 - Option for evenly spreading extra padding around the terminal (`window.dynamic_padding`)
-- Option for maximizing alacritty on start (`window.start_maximized`)
-- Display notice about errors and warnings inside Alacritty
+- Option for maximizing kairos on start (`window.start_maximized`)
+- Display notice about errors and warnings inside Kairos
 - Log all messages to both stderr and a log file in the system's temporary directory
 - New configuration option `persistent_logging` and CLI flag `--persistent-logging`,
-    for keeping the log file after closing Alacritty
+    for keeping the log file after closing Kairos
 - `ClearLogNotice` action for removing the warning and error message
 - Terminal bells on macOS will now request the user's attention in the window
-- Alacritty now requests privacy permissions on macOS
+- Kairos now requests privacy permissions on macOS
 
 ### Changed
 
 - Extra padding is not evenly spread around the terminal by default anymore
-- When the config file is empty, Alacritty now logs an info instead of an error message
+- When the config file is empty, Kairos now logs an info instead of an error message
 
 ### Fixed
 
 - Fixed a bad type conversion which could cause underflow on a window resize
-- Alacritty now spawns a login shell on macOS, as with Terminal.app and iTerm2
+- Kairos now spawns a login shell on macOS, as with Terminal.app and iTerm2
 - Fixed zombie processes sticking around after launching URLs
 - Zero-width characters are now properly rendered without progressing the cursor
 
@@ -1347,7 +1347,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - New `mouse.url.modifiers` option to specify keyboard modifiers for opening URLs on click
 - Binaries for macOS, Windows and Debian-based systems are now published with GitHub releases
 - The keys F16-F24 have been added as options for key bindings
-- DEB file adds Alacritty as option to `update-alternatives --config x-terminal-emulator`
+- DEB file adds Kairos as option to `update-alternatives --config x-terminal-emulator`
 
 ### Changed
 
@@ -1374,7 +1374,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - On Wayland, windows will no longer be spawned outside of the visible region
 - Resizing of windows without decorations
 - On Wayland, key repetition works again
-- On macOS, Alacritty will now use the integrated GPU again when available
+- On macOS, Kairos will now use the integrated GPU again when available
 - On Linux, the `WINIT_HIDPI_FACTOR` environment variable can be set from the config now
 
 ### Removed
@@ -1397,17 +1397,17 @@ Notable changes to the `alacritty_terminal` crate are documented in its
     - `buttonless` - Similar to transparent but also removed the buttons.
 - Add support for changing the colors from 16 to 256 in the `indexed_colors` config section
 - Add `save_to_clipboard` configuration option for copying selected text to the system clipboard
-- New terminfo entry, `alacritty-direct`, that advertises 24-bit color support
+- New terminfo entry, `kairos-direct`, that advertises 24-bit color support
 - Add support for CSI sequences Cursor Next Line (`\e[nE`) and Cursor Previous Line (`\e[nF`)
 
 ### Changed
 
 - Inverse/Selection color is now modelled after XTerm/VTE instead of URxvt to improve consistency
-- First click on unfocused Alacritty windows is no longer ignored on platforms other than macOS
+- First click on unfocused Kairos windows is no longer ignored on platforms other than macOS
 - Reduce memory usage significantly by only initializing part of the scrollback buffer at startup
-- The `alacritty` terminfo entry no longer requires the `xterm` definition to be
+- The `kairos` terminfo entry no longer requires the `xterm` definition to be
   present on the system
-- The default `TERM` value is no longer static; the `alacritty` entry is used if
+- The default `TERM` value is no longer static; the `kairos` entry is used if
   available, otherwise the `xterm-256color` entry is used instead
 - The values `true` and `false` for the config option `window.decorations` have been replaced with
     `full` and `none`
@@ -1425,7 +1425,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Removed
 
-- The terminfo entry `alacritty-256color`. It is replaced by the `alacritty`
+- The terminfo entry `kairos-256color`. It is replaced by the `kairos`
   entry (which also advertises 256 colors)
 
 ## Version 0.2.0
@@ -1435,7 +1435,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Add a scrollback history buffer (10_000 lines by default)
 - CHANGELOG has been added for documenting relevant user-facing changes
 - Add `ClearHistory` key binding action and the `Erase Saved Lines` control sequence
-- When growing the window height, Alacritty will now try to load additional lines out of the
+- When growing the window height, Kairos will now try to load additional lines out of the
   scrollback history
 - Support the dim foreground color (`echo -e '\033[2mDimmed Text'`)
 - Add support for the LCD-V pixel mode (vertical screens)
@@ -1453,5 +1453,5 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 ### Fixed
 
 - Clear the visible region when the RIS escape sequence (`echo -ne '\033c'`) is received
-- Prevent logger from crashing Alacritty when stdout/stderr is not available
+- Prevent logger from crashing Kairos when stdout/stderr is not available
 - Fix a crash when sending the IL escape sequence with a large number of lines

@@ -31,95 +31,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alacritty"
-version = "0.18.0-dev"
-dependencies = [
- "ahash",
- "alacritty_config",
- "alacritty_config_derive",
- "alacritty_terminal",
- "bitflags 2.9.4",
- "clap",
- "clap_complete",
- "copypasta",
- "crossfont",
- "dirs",
- "embed-resource",
- "gl_generator",
- "glutin",
- "home",
- "libc",
- "log",
- "notify",
- "objc2 0.6.3",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "parking_lot",
- "png",
- "polling",
- "rfd",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yaml",
- "signal-hook",
- "tempfile",
- "toml",
- "toml_edit 0.24.0+spec-1.1.0",
- "unicode-width",
- "windows-sys 0.59.0",
- "winit",
- "xdg",
-]
-
-[[package]]
-name = "alacritty_config"
-version = "0.2.4-dev"
-dependencies = [
- "alacritty_config_derive",
- "log",
- "serde",
- "toml",
-]
-
-[[package]]
-name = "alacritty_config_derive"
-version = "0.2.6-dev"
-dependencies = [
- "alacritty_config",
- "log",
- "proc-macro2",
- "quote",
- "serde",
- "syn",
- "toml",
-]
-
-[[package]]
-name = "alacritty_terminal"
-version = "0.26.1-dev"
-dependencies = [
- "base64",
- "bitflags 2.9.4",
- "home",
- "libc",
- "log",
- "miow",
- "parking_lot",
- "piper",
- "polling",
- "regex-automata",
- "rustix 1.1.2",
- "rustix-openpty",
- "serde",
- "serde_json",
- "signal-hook",
- "unicode-width",
- "vte",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "android-activity"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1424,6 +1335,95 @@ checksum = "ec48937a97411dcb524a265206ccd4c90bb711fca92b2792c407f268825b9305"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kairos"
+version = "0.18.0-dev"
+dependencies = [
+ "ahash",
+ "bitflags 2.9.4",
+ "clap",
+ "clap_complete",
+ "copypasta",
+ "crossfont",
+ "dirs",
+ "embed-resource",
+ "gl_generator",
+ "glutin",
+ "home",
+ "kairos_config",
+ "kairos_config_derive",
+ "kairos_terminal",
+ "libc",
+ "log",
+ "notify",
+ "objc2 0.6.3",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "parking_lot",
+ "png",
+ "polling",
+ "rfd",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "signal-hook",
+ "tempfile",
+ "toml",
+ "toml_edit 0.24.0+spec-1.1.0",
+ "unicode-width",
+ "windows-sys 0.59.0",
+ "winit",
+ "xdg",
+]
+
+[[package]]
+name = "kairos_config"
+version = "0.2.4-dev"
+dependencies = [
+ "kairos_config_derive",
+ "log",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "kairos_config_derive"
+version = "0.2.6-dev"
+dependencies = [
+ "kairos_config",
+ "log",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn",
+ "toml",
+]
+
+[[package]]
+name = "kairos_terminal"
+version = "0.26.1-dev"
+dependencies = [
+ "base64",
+ "bitflags 2.9.4",
+ "home",
+ "libc",
+ "log",
+ "miow",
+ "parking_lot",
+ "piper",
+ "polling",
+ "regex-automata",
+ "rustix 1.1.2",
+ "rustix-openpty",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "unicode-width",
+ "vte",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

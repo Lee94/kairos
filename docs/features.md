@@ -1,12 +1,12 @@
 # Features
 
-This document gives an overview over Alacritty's features beyond its terminal
+This document gives an overview over Kairos's features beyond its terminal
 emulation capabilities. To get a list with supported control sequences take a
-look at [Alacritty's escape sequence support](./escape_support.md).
+look at [Kairos's escape sequence support](./escape_support.md).
 
 ## Vi Mode
 
-The vi mode allows moving around Alacritty's viewport and scrollback using the
+The vi mode allows moving around Kairos's viewport and scrollback using the
 keyboard. It also serves as a jump-off point for other features like search and
 opening URLs with the keyboard. By default you can launch it using
 <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Space</kbd>.
@@ -29,7 +29,7 @@ active.
 
 ## Search
 
-Search allows you to find anything in Alacritty's scrollback buffer. You can
+Search allows you to find anything in Kairos's scrollback buffer. You can
 search forward using <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>f</kbd> (<kbd>Command</kbd> <kbd>f</kbd> on macOS) and
 backward using <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>b</kbd> (<kbd>Command</kbd> <kbd>b</kbd> on macOS).
 
@@ -51,7 +51,7 @@ stays selected, allowing you to easily copy it.
 
 Terminal hints allow easily interacting with visible text without having to
 start vi mode. They consist of a regex that detects these text elements and then
-either feeds them to an external application or triggers one of Alacritty's
+either feeds them to an external application or triggers one of Kairos's
 built-in actions.
 
 Hints can also be triggered using the mouse or vi mode cursor. If a hint is
@@ -60,7 +60,7 @@ the mouse or vi mode cursor is on top of it. Using the left mouse button or
 <kbd>Enter</kbd> key in vi mode will then trigger the hint.
 
 Hints can be configured in the `hints` and `colors.hints` sections in the
-Alacritty configuration file.
+Kairos configuration file.
 
 ## Selection expansion
 
@@ -79,6 +79,6 @@ that.
 
 ## Multi-Window
 
-Alacritty supports running multiple terminal emulators from the same Alacritty
+Kairos supports running multiple terminal emulators from the same Kairos
 instance. New windows can be created either by using the `CreateNewWindow`
-keybinding action, or by executing the `alacritty msg create-window` subcommand.
+keybinding action, or by executing the `kairos msg create-window` subcommand.

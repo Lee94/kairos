@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+TryExec=kairos
+Exec=kairos
+Icon=Kairos
+Terminal=false
+Categories=System;TerminalEmulator;
+
+Name=Kairos
+GenericName=Terminal
+Comment=A fast, cross-platform, OpenGL terminal emulator
+StartupNotify=true
+StartupWMClass=Kairos
+Actions=New;
+
+[Desktop Action New]
+Name=New Terminal
+Exec=kairos
