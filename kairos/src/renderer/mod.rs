@@ -401,11 +401,15 @@ impl Renderer {
     pub fn set_viewport(&self, size: &SizeInfo) {
         unsafe {
             // Reduce the height by `top_extra` (reserves the top egui chrome) and shift the left
-            // origin by `left_extra` while shrinking the width (reserves the left project sidebar).
+            // origin by `left_extra` while shrinking the width by both horizontal reservations
+            // (the left project sidebar and the right project pane).
             gl::Viewport(
                 size.padding_x() as i32 + size.left_extra() as i32,
                 size.padding_y() as i32,
-                size.width() as i32 - 2 * size.padding_x() as i32 - size.left_extra() as i32,
+                size.width() as i32
+                    - 2 * size.padding_x() as i32
+                    - size.left_extra() as i32
+                    - size.right_extra() as i32,
                 size.height() as i32 - 2 * size.padding_y() as i32 - size.top_extra() as i32,
             );
         }

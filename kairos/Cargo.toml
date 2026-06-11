@@ -46,6 +46,24 @@ unicode-width = "0.2.0"
 winit = { version = "0.30.9", default-features = false, features = ["rwh_06", "serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rfd = "0.15"
+tree-sitter = "0.26.9"
+tree-sitter-highlight = "0.26.9"
+tree-sitter-rust = "0.24.2"
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-go = "0.25.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-json = "0.24.8"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-yaml = "0.7.2"
+tree-sitter-html = "0.23.2"
+tree-sitter-css = "0.25.0"
+tree-sitter-bash = "0.25.1"
+tree-sitter-md = "0.5.3"
+# Markdown parsing for the rendered file preview; only the parser is needed.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [build-dependencies]
 gl_generator = "0.14.0"

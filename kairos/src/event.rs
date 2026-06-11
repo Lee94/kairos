@@ -56,6 +56,7 @@ use crate::display::color::Rgb;
 use crate::display::hint::HintMatch;
 use crate::display::window::{ImeInhibitor, Window};
 use crate::display::{Display, Preedit, SizeInfo};
+use crate::git_worker::GitData;
 use crate::input::{self, ActionContext as _, FONT_SIZE_STEP};
 use crate::logging::{LOG_TARGET_CONFIG, LOG_TARGET_WINIT};
 use crate::message_bar::{Message, MessageBuffer};
@@ -288,6 +289,7 @@ impl Processor {
             if let Some(window_context) = self.windows.get_mut(&window_id) {
                 window_context.session_key = win.key;
                 window_context.set_pixel_size(win.width, win.height);
+                window_context.display.set_pane_state(win.pane_visible, win.pane_cols);
                 window_context.restore_projects(proxy, &win.projects, win.active_project);
             }
             restored = true;
@@ -571,6 +573,18 @@ impl ApplicationHandler<Event> for Processor {
                     self.save_session(window_id);
                 }
             },
+            // A background git result for the project pane arrived.
+            (EventType::PaneGitData { root, data }, Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.apply_pane_git_data(root, data);
+                }
+            },
+            // Periodic git refresh tick for the project pane.
+            (EventType::PaneGitRefresh, Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.refresh_pane_git();
+                }
+            },
             // Copy/paste requested from the egui context menu.
             (EventType::Copy, Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
@@ -822,6 +836,10 @@ pub enum EventType {
     CloseProject(usize),
     /// Resume a Claude Code session in a new tab (from the sidebar session list).
     OpenClaudeSession { project_index: usize, session_id: String },
+    /// A git worker result for the project pane, tagged with the root it was computed for.
+    PaneGitData { root: PathBuf, data: GitData },
+    /// Periodic tick to refresh the active project's git status while the pane is visible.
+    PaneGitRefresh,
     #[cfg(unix)]
     IpcConfig(IpcConfig),
     #[cfg(unix)]
@@ -2272,6 +2290,8 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 | EventType::SelectProject(_)
                 | EventType::CloseProject(_)
                 | EventType::OpenClaudeSession { .. }
+                | EventType::PaneGitData { .. }
+                | EventType::PaneGitRefresh
                 | EventType::Copy
                 | EventType::Paste
                 | EventType::Frame => (),

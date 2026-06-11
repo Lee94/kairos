@@ -14,9 +14,10 @@ use std::path::PathBuf;
 use log::{error, warn};
 use rusqlite::{Connection, params};
 
-/// Schema version. Bumped whenever the table layout changes; a mismatch drops and recreates the
+/// Schema version. Bumped whenever the table layout changes. Versions with a known upgrade path
+/// (see [`SessionStore::migrate`]) are migrated in place; anything else drops and recreates the
 /// tables (session restore is best-effort, so losing one prior session on upgrade is acceptable).
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// A single restored tab.
 #[derive(Debug, Clone, Default)]
@@ -51,6 +52,10 @@ pub struct SavedWindow {
     pub height: u32,
     /// Index of the project that was active.
     pub active_project: usize,
+    /// Whether the right-side project pane was shown.
+    pub pane_visible: bool,
+    /// Project pane width in chrome cells (DPI-independent); `0` means "use the default".
+    pub pane_cols: f32,
     /// Projects in display order.
     pub projects: Vec<SavedProject>,
 }
@@ -62,10 +67,12 @@ pub struct SessionStore {
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS windows (
-        key    INTEGER PRIMARY KEY,
-        width  INTEGER NOT NULL,
-        height INTEGER NOT NULL,
-        active INTEGER NOT NULL
+        key          INTEGER PRIMARY KEY,
+        width        INTEGER NOT NULL,
+        height       INTEGER NOT NULL,
+        active       INTEGER NOT NULL,
+        pane_visible INTEGER NOT NULL DEFAULT 1,
+        pane_cols    REAL NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS projects (
         window_key INTEGER NOT NULL,
@@ -110,27 +117,45 @@ impl SessionStore {
 
     /// Bring the database schema up to [`SCHEMA_VERSION`].
     ///
-    /// On a version mismatch the tables are dropped and recreated. This loses at most one prior
-    /// session's restore data, which is acceptable for a best-effort feature.
+    /// v2 databases are upgraded in place (the project pane columns are purely additive), keeping
+    /// the saved session. Any other version mismatch — and a v2 upgrade that fails, e.g. on a
+    /// half-upgraded table — drops and recreates the tables, losing at most one prior session's
+    /// restore data, which is acceptable for a best-effort feature. The whole migration runs in
+    /// one transaction so an interrupted upgrade can't strand the database between versions.
     fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version != SCHEMA_VERSION {
-            conn.execute_batch(
-                "DROP TABLE IF EXISTS tabs;
-                 DROP TABLE IF EXISTS projects;
-                 DROP TABLE IF EXISTS windows;",
-            )?;
+        const DROP_ALL: &str = "DROP TABLE IF EXISTS tabs;
+             DROP TABLE IF EXISTS projects;
+             DROP TABLE IF EXISTS windows;";
+
+        let tx = conn.unchecked_transaction()?;
+        let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version == 2 {
+            let upgrade = tx.execute_batch(
+                "ALTER TABLE windows ADD COLUMN pane_visible INTEGER NOT NULL DEFAULT 1;
+                 ALTER TABLE windows ADD COLUMN pane_cols REAL NOT NULL DEFAULT 0;",
+            );
+            if let Err(err) = upgrade {
+                warn!("session: in-place v2 upgrade failed, recreating: {err}");
+                tx.execute_batch(DROP_ALL)?;
+            }
+        } else if version != SCHEMA_VERSION {
+            tx.execute_batch(DROP_ALL)?;
         }
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        Ok(())
+        tx.execute_batch(SCHEMA)?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.commit()
     }
 
     /// Resolve the database path, creating its parent directory.
     ///
     /// Stored under the XDG state directory on Unix (`~/.local/state/kairos`) and the data
-    /// directory on Windows (`%APPDATA%\kairos`).
+    /// directory on Windows (`%APPDATA%\kairos`). `KAIROS_SESSION_DB` overrides the path
+    /// entirely, letting tests and development builds keep their sessions isolated.
     fn db_path() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("KAIROS_SESSION_DB") {
+            return Some(PathBuf::from(path));
+        }
+
         #[cfg(not(windows))]
         {
             match xdg::BaseDirectories::with_prefix("kairos").place_state_file("session.db") {
@@ -172,9 +197,18 @@ impl SessionStore {
     fn save_window_inner(&self, win: &SavedWindow) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO windows (key, width, height, active) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(key) DO UPDATE SET width = ?2, height = ?3, active = ?4",
-            params![win.key, win.width, win.height, win.active_project as i64],
+            "INSERT INTO windows (key, width, height, active, pane_visible, pane_cols)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(key) DO UPDATE
+             SET width = ?2, height = ?3, active = ?4, pane_visible = ?5, pane_cols = ?6",
+            params![
+                win.key,
+                win.width,
+                win.height,
+                win.active_project as i64,
+                win.pane_visible,
+                win.pane_cols as f64
+            ],
         )?;
         tx.execute("DELETE FROM tabs WHERE window_key = ?1", params![win.key])?;
         tx.execute("DELETE FROM projects WHERE window_key = ?1", params![win.key])?;
@@ -231,8 +265,10 @@ impl SessionStore {
     }
 
     fn load_inner(&self) -> rusqlite::Result<Vec<SavedWindow>> {
-        let mut win_stmt =
-            self.conn.prepare("SELECT key, width, height, active FROM windows ORDER BY key")?;
+        let mut win_stmt = self.conn.prepare(
+            "SELECT key, width, height, active, pane_visible, pane_cols
+             FROM windows ORDER BY key",
+        )?;
         let mut windows: Vec<SavedWindow> = win_stmt
             .query_map([], |row| {
                 Ok(SavedWindow {
@@ -240,6 +276,8 @@ impl SessionStore {
                     width: row.get::<_, i64>(1)? as u32,
                     height: row.get::<_, i64>(2)? as u32,
                     active_project: row.get::<_, i64>(3)?.max(0) as usize,
+                    pane_visible: row.get(4)?,
+                    pane_cols: row.get::<_, f64>(5)? as f32,
                     projects: Vec::new(),
                 })
             })?
@@ -310,6 +348,18 @@ mod tests {
         SavedProject { name: name.into(), root: Some(PathBuf::from(root)), active_tab, tabs }
     }
 
+    fn window(key: i64, projects: Vec<SavedProject>) -> SavedWindow {
+        SavedWindow {
+            key,
+            width: 1,
+            height: 1,
+            active_project: 0,
+            pane_visible: true,
+            pane_cols: 0.,
+            projects,
+        }
+    }
+
     #[test]
     fn save_and_load_roundtrip() {
         let store = SessionStore::in_memory();
@@ -318,6 +368,8 @@ mod tests {
             width: 1280,
             height: 720,
             active_project: 1,
+            pane_visible: false,
+            pane_cols: 42.5,
             projects: vec![
                 project("app", "/app", 0, vec![tab("/app", "a0")]),
                 project("docs", "/docs", 1, vec![tab("/docs", "d0"), tab("/docs/x", "d1")]),
@@ -330,6 +382,8 @@ mod tests {
         assert_eq!(loaded[0].key, 1);
         assert_eq!(loaded[0].width, 1280);
         assert_eq!(loaded[0].active_project, 1);
+        assert!(!loaded[0].pane_visible);
+        assert_eq!(loaded[0].pane_cols, 42.5);
         assert_eq!(loaded[0].projects.len(), 2);
         assert_eq!(loaded[0].projects[1].name, "docs");
         assert_eq!(loaded[0].projects[1].root, Some(PathBuf::from("/docs")));
@@ -341,24 +395,12 @@ mod tests {
     #[test]
     fn save_window_replaces_projects_and_tabs() {
         let store = SessionStore::in_memory();
-        store.save_window(&SavedWindow {
-            key: 1,
-            width: 1,
-            height: 1,
-            active_project: 0,
-            projects: vec![
-                project("a", "/a", 0, vec![tab("/a", "a0"), tab("/a", "a1")]),
-                project("b", "/b", 0, vec![tab("/b", "b0")]),
-            ],
-        });
+        store.save_window(&window(1, vec![
+            project("a", "/a", 0, vec![tab("/a", "a0"), tab("/a", "a1")]),
+            project("b", "/b", 0, vec![tab("/b", "b0")]),
+        ]));
         // Re-save with fewer projects/tabs; stale rows must not linger.
-        store.save_window(&SavedWindow {
-            key: 1,
-            width: 1,
-            height: 1,
-            active_project: 0,
-            projects: vec![project("x", "/x", 0, vec![tab("/x", "x0")])],
-        });
+        store.save_window(&window(1, vec![project("x", "/x", 0, vec![tab("/x", "x0")])]));
 
         let loaded = store.load();
         assert_eq!(loaded.len(), 1);
@@ -372,20 +414,8 @@ mod tests {
         let store = SessionStore::in_memory();
         assert_eq!(store.max_key(), 0);
 
-        store.save_window(&SavedWindow {
-            key: 3,
-            width: 1,
-            height: 1,
-            active_project: 0,
-            projects: vec![project("a", "/a", 0, vec![tab("/a", "a")])],
-        });
-        store.save_window(&SavedWindow {
-            key: 7,
-            width: 1,
-            height: 1,
-            active_project: 0,
-            projects: vec![project("b", "/b", 0, vec![tab("/b", "b")])],
-        });
+        store.save_window(&window(3, vec![project("a", "/a", 0, vec![tab("/a", "a")])]));
+        store.save_window(&window(7, vec![project("b", "/b", 0, vec![tab("/b", "b")])]));
         assert_eq!(store.max_key(), 7);
 
         store.remove_window(3);
@@ -430,13 +460,76 @@ mod tests {
         assert!(store.load().is_empty());
 
         // The new `projects` table now exists and is usable.
-        store.save_window(&SavedWindow {
-            key: 1,
-            width: 1,
-            height: 1,
-            active_project: 0,
-            projects: vec![project("p", "/p", 0, vec![tab("/p", "t")])],
-        });
+        store.save_window(&window(1, vec![project("p", "/p", 0, vec![tab("/p", "t")])]));
+        assert_eq!(store.load().len(), 1);
+    }
+
+    #[test]
+    fn v2_schema_is_upgraded_in_place() {
+        // Simulate a v2 database (no project pane columns) with saved data.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE windows (
+                 key INTEGER PRIMARY KEY, width INTEGER NOT NULL, height INTEGER NOT NULL,
+                 active INTEGER NOT NULL
+             );
+             CREATE TABLE projects (
+                 window_key INTEGER NOT NULL, position INTEGER NOT NULL, name TEXT NOT NULL,
+                 root TEXT, active INTEGER NOT NULL, PRIMARY KEY (window_key, position)
+             );
+             CREATE TABLE tabs (
+                 window_key INTEGER NOT NULL, project_position INTEGER NOT NULL,
+                 position INTEGER NOT NULL, cwd TEXT, title TEXT NOT NULL,
+                 PRIMARY KEY (window_key, project_position, position)
+             );
+             INSERT INTO windows VALUES (1, 800, 600, 0);
+             INSERT INTO projects VALUES (1, 0, 'p', '/p', 0);
+             INSERT INTO tabs VALUES (1, 0, 0, '/p', 't');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 2i64).unwrap();
+
+        // Upgrading must keep the saved session and default the new pane columns.
+        SessionStore::migrate(&conn).unwrap();
+        let store = SessionStore { conn };
+        let loaded = store.load();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].width, 800);
+        assert!(loaded[0].pane_visible);
+        assert_eq!(loaded[0].pane_cols, 0.);
+        assert_eq!(loaded[0].projects[0].tabs[0].title, "t");
+    }
+
+    #[test]
+    fn half_migrated_v2_schema_recovers() {
+        // Simulate an interrupted v2 upgrade: one pane column already added, version still 2.
+        // The in-place ALTER then fails with "duplicate column name"; migrate must fall back to
+        // recreating the tables instead of failing forever.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE windows (
+                 key INTEGER PRIMARY KEY, width INTEGER NOT NULL, height INTEGER NOT NULL,
+                 active INTEGER NOT NULL, pane_visible INTEGER NOT NULL DEFAULT 1
+             );
+             CREATE TABLE projects (
+                 window_key INTEGER NOT NULL, position INTEGER NOT NULL, name TEXT NOT NULL,
+                 root TEXT, active INTEGER NOT NULL, PRIMARY KEY (window_key, position)
+             );
+             CREATE TABLE tabs (
+                 window_key INTEGER NOT NULL, project_position INTEGER NOT NULL,
+                 position INTEGER NOT NULL, cwd TEXT, title TEXT NOT NULL,
+                 PRIMARY KEY (window_key, project_position, position)
+             );",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 2i64).unwrap();
+
+        SessionStore::migrate(&conn).unwrap();
+        let store = SessionStore { conn };
+        assert!(store.load().is_empty());
+
+        // The recreated schema is fully usable.
+        store.save_window(&window(1, vec![project("p", "/p", 0, vec![tab("/p", "t")])]));
         assert_eq!(store.load().len(), 1);
     }
 }

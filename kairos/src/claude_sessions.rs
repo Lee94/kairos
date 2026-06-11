@@ -60,7 +60,7 @@ pub fn sessions_for(root: &Path) -> Vec<ClaudeSession> {
         }
         found.push((stem.to_owned(), path, mtime));
     }
-    found.sort_by(|a, b| b.2.cmp(&a.2));
+    found.sort_by_key(|entry| std::cmp::Reverse(entry.2));
     found.truncate(MAX_SESSIONS_SHOWN);
 
     found

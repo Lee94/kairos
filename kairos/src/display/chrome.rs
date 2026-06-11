@@ -20,6 +20,7 @@ use crate::display::content::RenderableCell;
 use crate::renderer::rects::RenderRect;
 
 use super::TabBarInfo;
+use super::project_pane::{self, PaneTab, ProjectPaneData, ProjectPaneState, ViewerKind};
 
 /// Fixed logical size (points) of the chrome UI font, like Zed's `ui_font_size`: the chrome is
 /// fully decoupled from the terminal font and scales only with the window scale factor, so a large
@@ -32,6 +33,11 @@ const DEFAULT_SIDEBAR_COLS: f32 = 26.;
 /// Clamp range (in chrome cells) the sidebar may be dragged to.
 const MIN_SIDEBAR_COLS: f32 = 12.;
 const MAX_SIDEBAR_COLS: f32 = 80.;
+/// Default width (in chrome cells) of the right-side project pane.
+const DEFAULT_PANE_COLS: f32 = 34.;
+/// Clamp range (in chrome cells) the project pane may be dragged to.
+const MIN_PANE_COLS: f32 = 16.;
+const MAX_PANE_COLS: f32 = 100.;
 /// Half-width (window pixels) of the grab zone straddling the sidebar's right divider.
 const DIVIDER_GRAB_PX: f32 = 4.;
 /// Maximum display width (in chrome cells) of a tab label before it is truncated.
@@ -56,30 +62,31 @@ fn c(r: u8, g: u8, b: u8) -> Rgb {
     Rgb::new(r, g, b)
 }
 
-// zinc palette (shadcn-inspired), matching the previous egui theme.
-fn bar_bg() -> Rgb {
+// zinc palette (shadcn-inspired), matching the previous egui theme. Shared with the project
+// pane module, hence the `pub(crate)` visibility on the surface colors it reuses.
+pub(crate) fn bar_bg() -> Rgb {
     c(0x0c, 0x0c, 0x0e)
 }
-fn menu_bg() -> Rgb {
+pub(crate) fn menu_bg() -> Rgb {
     c(0x09, 0x09, 0x0b)
 }
-fn border() -> Rgb {
+pub(crate) fn border() -> Rgb {
     c(0x27, 0x27, 0x2a)
 }
 /// Selected item background.
-fn accent() -> Rgb {
+pub(crate) fn accent() -> Rgb {
     c(0x3f, 0x3f, 0x46)
 }
 /// Hovered item background.
-fn hover_bg() -> Rgb {
+pub(crate) fn hover_bg() -> Rgb {
     c(0x27, 0x27, 0x2a)
 }
 /// Primary foreground.
-fn fg() -> Rgb {
+pub(crate) fn fg() -> Rgb {
     c(0xfa, 0xfa, 0xfa)
 }
 /// Muted foreground (headers, idle affordances).
-fn dim() -> Rgb {
+pub(crate) fn dim() -> Rgb {
     c(0xa1, 0xa1, 0xaa)
 }
 /// Command-palette search-field background, a hair lighter than the menu surface.
@@ -106,6 +113,7 @@ pub enum PaletteCmd {
     NewTab,
     NewProject,
     ToggleSidebar,
+    ToggleProjectPane,
 }
 
 /// The command palette's entries: `(label, search keywords, command)`. The keywords (lowercase,
@@ -115,6 +123,11 @@ pub const PALETTE_COMMANDS: &[(&str, &str, PaletteCmd)] = &[
     ("新建标签页", "new tab xinjian biaoqianye", PaletteCmd::NewTab),
     ("新建项目", "new project folder xinjian xiangmu", PaletteCmd::NewProject),
     ("切换侧边栏", "toggle sidebar qiehuan cebianlan", PaletteCmd::ToggleSidebar),
+    (
+        "切换项目面板",
+        "toggle project pane panel files changes qiehuan xiangmu mianban",
+        PaletteCmd::ToggleProjectPane,
+    ),
 ];
 
 /// State of the open command palette: the committed query, the in-flight IME composition
@@ -301,11 +314,11 @@ fn find_windows_shell(suffixes: &[&str]) -> Option<String> {
 
 /// A clickable region of the chrome, in window pixels.
 #[derive(Clone, Copy)]
-struct PixelRect {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
+pub(crate) struct PixelRect {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) w: f32,
+    pub(crate) h: f32,
 }
 
 impl PixelRect {
@@ -325,6 +338,31 @@ pub enum Hit {
     CreateProject,
     /// Resume the active project's Claude session at this index into `TabBarInfo::project_sessions`.
     OpenClaudeSession(usize),
+    /// Switch the project pane to its Files tab.
+    PaneShowFiles,
+    /// Switch the project pane to its Changes tab.
+    PaneShowChanges,
+    /// A file-tree row (directory or file) at this index into the pane's flattened visible tree.
+    PaneFileRow(usize),
+    /// A changed-file row at this index into the pane's Changes list.
+    PaneChangeRow(usize),
+    /// A shared viewer tab (预览 / diff) in the tab bar; focuses it.
+    ViewerTab(ViewerKind),
+    /// A shared viewer tab's close button.
+    ViewerTabClose(ViewerKind),
+    /// The center viewer's header close button (closes the focused viewer tab).
+    ViewerClose,
+    /// Switch the center viewer's diff to the unified (行间) layout.
+    ViewerUnified,
+    /// Switch the center viewer's diff to the side-by-side (分栏) layout.
+    ViewerSplit,
+    /// Toggle rendering the center viewer's diff with difftastic.
+    ViewerDifft,
+    /// Toggle the markdown preview between rendered output and source text.
+    ViewerMdSource,
+    /// A click landing on the center viewer's body but not a control; consumed without action so
+    /// it never reaches the terminal beneath.
+    ViewerBackground,
     Copy,
     Paste,
     /// Activate the command-palette entry at this index into [`PALETTE_COMMANDS`].
@@ -362,12 +400,16 @@ pub struct ChromeDraw {
     pub sidebar_width: f32,
     /// Pixel height reserved at the bottom for the git status bar (0 when hidden).
     pub status_height: f32,
+    /// Pixel width reserved at the right for the project pane (0 when hidden).
+    pub pane_width: f32,
 }
 
 /// Native chrome state: visibility, the open context menu, the last mouse position and the hot
 /// regions from the most recent layout.
 pub struct Chrome {
     pub sidebar_visible: bool,
+    /// Whether the right-side project pane is shown (for projects with a root folder).
+    pub pane_visible: bool,
     /// Window-pixel position the right-click context menu was opened at, if any.
     pub context_menu: Option<(f32, f32)>,
     /// Last observed mouse position in window pixels.
@@ -378,16 +420,26 @@ pub struct Chrome {
     hover: Option<Hit>,
     /// Sidebar width (px) from the most recent layout, for region tests.
     sidebar_w: f32,
+    /// Project pane width (px) from the most recent layout, for region tests.
+    pane_w: f32,
     /// Tab bar height (px) from the most recent layout, for region tests.
     bar_h: f32,
     /// Git status bar height (px) from the most recent layout, for region tests.
     status_h: f32,
     /// Window height (px) from the most recent layout, anchoring the bottom status bar.
     win_h: f32,
+    /// Window width (px) from the most recent layout, anchoring the right project pane.
+    win_w: f32,
     /// Sidebar width in chrome cells; adjusted by dragging its right-edge divider.
     sidebar_cols: f32,
+    /// Project pane width in chrome cells; adjusted by dragging its left-edge divider.
+    pane_cols: f32,
     /// Whether the sidebar divider is currently being dragged.
     dragging_divider: bool,
+    /// Whether the project pane divider is currently being dragged.
+    dragging_pane_divider: bool,
+    /// Transient UI state of the project pane (active tab, scrolls, expanded diff).
+    pane: ProjectPaneState,
     /// State of the open command palette (search query + selection), if any.
     command_palette: Option<PaletteState>,
     /// Window-pixel caret box `(x, y, w, h)` of the palette search field from the last layout, used
@@ -401,16 +453,22 @@ impl Chrome {
     pub fn new() -> Self {
         Self {
             sidebar_visible: true,
+            pane_visible: true,
             context_menu: None,
             mouse: (0., 0.),
             hits: Vec::new(),
             hover: None,
             sidebar_w: 0.,
+            pane_w: 0.,
             bar_h: 0.,
             status_h: 0.,
             win_h: 0.,
+            win_w: 0.,
             sidebar_cols: DEFAULT_SIDEBAR_COLS,
+            pane_cols: DEFAULT_PANE_COLS,
             dragging_divider: false,
+            dragging_pane_divider: false,
+            pane: ProjectPaneState::default(),
             command_palette: None,
             palette_ime_rect: None,
             settings: None,
@@ -419,6 +477,165 @@ impl Chrome {
 
     pub fn toggle_sidebar(&mut self) {
         self.sidebar_visible = !self.sidebar_visible;
+    }
+
+    pub fn toggle_pane(&mut self) {
+        self.pane_visible = !self.pane_visible;
+    }
+
+    /// Switch the project pane to `tab`.
+    pub fn pane_set_tab(&mut self, tab: PaneTab) {
+        self.pane.tab = tab;
+    }
+
+    /// Open (or retarget) the shared 预览 tab to `path` and focus it.
+    pub fn open_file_preview(&mut self, path: &str) {
+        self.pane.open_viewer(ViewerKind::Preview, path);
+    }
+
+    /// Open (or retarget) the shared diff tab to the changed file `path` and focus it.
+    pub fn open_diff_viewer(&mut self, path: &str) {
+        self.pane.open_viewer(ViewerKind::Diff, path);
+    }
+
+    /// Focus the viewer tab of `kind`, when it is open.
+    pub fn focus_viewer(&mut self, kind: ViewerKind) {
+        self.pane.focus_viewer(kind);
+    }
+
+    /// Close the viewer tab of `kind` (focus falls back to the terminal when it was focused).
+    pub fn close_viewer_tab(&mut self, kind: ViewerKind) {
+        self.pane.close_viewer_tab(kind);
+    }
+
+    /// Close the focused viewer tab, returning whether one was focused.
+    pub fn close_focused_viewer(&mut self) -> bool {
+        match self.pane.viewer_focus {
+            Some(kind) => {
+                self.pane.close_viewer_tab(kind);
+                true
+            },
+            None => false,
+        }
+    }
+
+    /// Drop viewer focus back to the terminal (the tabs stay open), returning whether a viewer
+    /// tab was focused.
+    pub fn unfocus_viewer(&mut self) -> bool {
+        self.pane.viewer_focus.take().is_some()
+    }
+
+    /// Relative path held by the shared diff tab, if it is open.
+    pub fn pane_selected(&self) -> Option<&str> {
+        self.pane.diff_tab.as_deref()
+    }
+
+    /// Whether a viewer tab is focused (the center area shows it instead of the terminal).
+    pub fn viewer_open(&self) -> bool {
+        self.pane.viewer_focus.is_some()
+    }
+
+    /// Whether `(x, y)` (window pixels) lies within the open center viewer (the terminal area
+    /// between the chrome surfaces).
+    pub fn viewer_contains(&self, x: f32, y: f32) -> bool {
+        self.viewer_open()
+            && x >= self.sidebar_w
+            && x < self.win_w - self.pane_w
+            && y >= self.bar_h
+            && y < self.win_h - self.status_h
+    }
+
+    /// Scroll the focused viewer tab's content by `rows` (positive scrolls down).
+    pub fn scroll_viewer(&mut self, rows: f32) {
+        self.pane.scroll_viewer(rows);
+    }
+
+    /// Switch the center viewer's diff layout between unified and side-by-side.
+    pub fn set_viewer_split(&mut self, split: bool) {
+        self.pane.diff_split = split;
+    }
+
+    /// Whether the center viewer's diff uses the side-by-side layout.
+    pub fn viewer_split(&self) -> bool {
+        self.pane.diff_split
+    }
+
+    /// Toggle difftastic rendering for the center viewer's diff, returning the new state.
+    pub fn toggle_viewer_difft(&mut self) -> bool {
+        self.pane.difft_mode = !self.pane.difft_mode;
+        self.pane.difft_mode
+    }
+
+    /// Whether the center viewer renders diffs with difftastic.
+    pub fn viewer_difft(&self) -> bool {
+        self.pane.difft_mode
+    }
+
+    /// Toggle the markdown preview between rendered output and source, returning whether the
+    /// source view is now active.
+    pub fn toggle_md_source(&mut self) -> bool {
+        self.pane.md_source = !self.pane.md_source;
+        self.pane.md_source
+    }
+
+    /// Whether the markdown preview shows source text instead of rendered output.
+    pub fn md_source(&self) -> bool {
+        self.pane.md_source
+    }
+
+    /// Path held by the shared 预览 tab, if it is open.
+    pub fn previewed_file(&self) -> Option<&str> {
+        self.pane.preview_tab.as_deref()
+    }
+
+    /// Path of the pane's directory row registered at `index` by the last layout.
+    pub fn pane_dir_path(&self, index: usize) -> Option<String> {
+        self.pane.dir_path(index).map(str::to_owned)
+    }
+
+    /// Path of the pane's plain-file row registered at `index` by the last layout.
+    pub fn pane_file_path(&self, index: usize) -> Option<String> {
+        self.pane.file_path(index).map(str::to_owned)
+    }
+
+    /// Path of the pane's changed-file row registered at `index` by the last layout.
+    pub fn pane_change_path(&self, index: usize) -> Option<String> {
+        self.pane.change_path(index).map(str::to_owned)
+    }
+
+    /// Whether `(x, y)` (window pixels) lies within the project pane's content region.
+    pub fn pane_contains(&self, x: f32, y: f32) -> bool {
+        self.pane_w > 0.
+            && x >= self.win_w - self.pane_w
+            && y >= self.bar_h
+            && y < self.win_h - self.status_h
+    }
+
+    /// Scroll the project pane's active view by `rows` (positive scrolls down).
+    pub fn scroll_pane(&mut self, rows: f32) {
+        match self.pane.tab {
+            PaneTab::Files => self.pane.files_scroll.scroll_by(rows),
+            PaneTab::Changes => self.pane.changes_scroll.scroll_by(rows),
+        }
+    }
+
+    /// Reset the pane's scroll offsets and the center viewer (used on project switches).
+    pub fn pane_reset_view(&mut self) {
+        self.pane.reset_view();
+    }
+
+    /// The pane's width in chrome cells (DPI-independent), for session persistence.
+    pub fn pane_cols(&self) -> f32 {
+        self.pane_cols
+    }
+
+    /// Restore the pane's visibility and width from a saved session. A non-positive `cols` keeps
+    /// the default width.
+    pub fn set_pane_state(&mut self, visible: bool, cols: f32) {
+        self.pane_visible = visible;
+        if cols > 0. {
+            self.pane_cols = cols.clamp(MIN_PANE_COLS, MAX_PANE_COLS);
+        }
     }
 
     /// Open the command palette, or close it if already open. Closes other overlays.
@@ -646,6 +863,36 @@ impl Chrome {
         }
     }
 
+    /// Whether `x` (window pixels) is within the grab zone of the project pane's left-edge
+    /// divider.
+    pub fn over_pane_divider(&self, x: f32) -> bool {
+        self.pane_visible
+            && self.pane_w > 0.
+            && (x - (self.win_w - self.pane_w)).abs() <= DIVIDER_GRAB_PX
+    }
+
+    /// Whether a project pane divider drag is currently in progress.
+    pub fn is_dragging_pane_divider(&self) -> bool {
+        self.dragging_pane_divider
+    }
+
+    /// Begin dragging the project pane divider.
+    pub fn begin_pane_divider_drag(&mut self) {
+        self.dragging_pane_divider = true;
+    }
+
+    /// End an in-progress pane divider drag, returning whether one was actually active.
+    pub fn end_pane_divider_drag(&mut self) -> bool {
+        std::mem::take(&mut self.dragging_pane_divider)
+    }
+
+    /// Resize the project pane so its left edge tracks pointer `x` (window pixels).
+    pub fn drag_pane_divider_to(&mut self, x: f32, cw: f32) {
+        if cw > 0. {
+            self.pane_cols = ((self.win_w - x) / cw).clamp(MIN_PANE_COLS, MAX_PANE_COLS);
+        }
+    }
+
     /// The last mouse position recorded via [`Self::set_mouse`], in window pixels.
     pub fn last_mouse(&self) -> (f32, f32) {
         self.mouse
@@ -661,10 +908,11 @@ impl Chrome {
         changed
     }
 
-    /// Whether `(x, y)` (window pixels) lies over any chrome surface (sidebar, tab bar or the
-    /// bottom status bar).
+    /// Whether `(x, y)` (window pixels) lies over any chrome surface (sidebar, project pane,
+    /// tab bar or the bottom status bar).
     pub fn in_region(&self, x: f32, y: f32) -> bool {
         (self.sidebar_w > 0. && x < self.sidebar_w)
+            || (self.pane_w > 0. && x >= self.win_w - self.pane_w)
             || (self.bar_h > 0. && y < self.bar_h)
             || (self.status_h > 0. && y >= self.win_h - self.status_h)
     }
@@ -690,6 +938,7 @@ impl Chrome {
     pub fn layout(
         &mut self,
         info: &TabBarInfo,
+        pane_data: Option<&ProjectPaneData>,
         cw: f32,
         ch: f32,
         win_w: f32,
@@ -706,14 +955,18 @@ impl Chrome {
         let show_tabs = Self::show_tab_bar(info.titles.len());
         let bar_h = if show_tabs { ch * BAR_H_MULT } else { 0. };
         let status_h = if info.git_info.is_some() { ch * STATUS_H_MULT } else { 0. };
+        let pane_w = if self.pane_visible && pane_data.is_some() { self.pane_cols * cw } else { 0. };
 
         self.sidebar_w = sidebar_w;
+        self.pane_w = pane_w;
         self.bar_h = bar_h;
         self.status_h = status_h;
         self.win_h = win_h;
+        self.win_w = win_w;
         draw.sidebar_width = sidebar_w;
         draw.bar_height = bar_h;
         draw.status_height = status_h;
+        draw.pane_width = pane_w;
 
         if self.sidebar_visible {
             self.layout_sidebar(info, &mut draw, cw, ch, win_h, sidebar_w, pad_x, row_h);
@@ -724,6 +977,20 @@ impl Chrome {
         if let Some(git_info) = info.git_info.as_deref() {
             self.layout_status_bar(&mut draw, cw, ch, win_w, win_h, sidebar_w, pad_x, status_h,
                 git_info);
+        }
+        if pane_w > 0. {
+            if let Some(data) = pane_data {
+                project_pane::layout(&mut self.pane, data, self.hover, &mut self.hits, &mut draw,
+                    cw, ch, win_w, win_h, bar_h, status_h, pane_w, pad_x, row_h);
+            }
+        }
+        // The center viewer (file preview / diff) covers the terminal area between the chrome
+        // surfaces. Laid out after the pane so its hit regions stack above the base chrome, but
+        // before the context menu and modal overlays.
+        if let Some(data) = pane_data {
+            project_pane::layout_viewer(&mut self.pane, data, self.hover, &mut self.hits,
+                &mut draw, cw, ch, sidebar_w, bar_h, win_w - pane_w, win_h - status_h, pad_x,
+                row_h);
         }
         if self.context_menu.is_some() {
             self.layout_context_menu(&mut draw, cw, ch, win_w, win_h, pad_x, row_h);
@@ -868,7 +1135,8 @@ impl Chrome {
                 break;
             }
 
-            let selected = i == info.active;
+            // A focused viewer tab steals the highlight from the active terminal tab.
+            let selected = i == info.active && self.pane.viewer_focus.is_none();
             if selected {
                 draw.rects.push(rect(x - pad_x * 0.5, hl_margin, seg_w + pad_x, hl_h, accent()));
             } else if self.hover == Some(Hit::SelectTab(id)) {
@@ -889,6 +1157,49 @@ impl Chrome {
             }
             push_text_px(&mut draw.cells, close_x, base, "×", dim(), cw);
             self.hits.push((close_region, Hit::CloseTab(id)));
+
+            x += seg_w + tab_gap;
+        }
+
+        // The shared viewer tabs (预览 / diff), after the terminal tabs. They render like
+        // terminal tabs — label plus close button — and exist only while holding content.
+        let viewer_tabs: Vec<(ViewerKind, String)> = [
+            (ViewerKind::Preview, "预览", self.pane.preview_tab.as_deref()),
+            (ViewerKind::Diff, "diff", self.pane.diff_tab.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(kind, prefix, path)| {
+            let name = path?.rsplit('/').next().unwrap_or_default();
+            Some((kind, format!("{prefix}:{name}")))
+        })
+        .collect();
+        for (kind, label) in viewer_tabs {
+            let label = truncate(&label, MAX_TAB_LABEL);
+            let label_w = str_width(&label) as f32 * cw;
+            let seg_w = label_w + pad_x + cw;
+            if x + seg_w + pad_x > win_w {
+                break;
+            }
+
+            let selected = self.pane.viewer_focus == Some(kind);
+            if selected {
+                draw.rects.push(rect(x - pad_x * 0.5, hl_margin, seg_w + pad_x, hl_h, accent()));
+            } else if self.hover == Some(Hit::ViewerTab(kind)) {
+                draw.rects.push(rect(x - pad_x * 0.5, hl_margin, seg_w + pad_x, hl_h, hover_bg()));
+            }
+
+            let label_region = PixelRect { x, y: 0., w: label_w + pad_x * 0.5, h: bar_h };
+            push_text_px(&mut draw.cells, x, base, &label, if selected { fg() } else { dim() }, cw);
+            self.hits.push((label_region, Hit::ViewerTab(kind)));
+
+            let close_x = x + label_w + pad_x;
+            let close_region =
+                PixelRect { x: close_x - pad_x * 0.5, y: 0., w: cw + pad_x * 0.5, h: bar_h };
+            if self.hover == Some(Hit::ViewerTabClose(kind)) {
+                draw.rects.push(rect(close_x - 3., hl_margin, cw + 6., hl_h, hover_bg()));
+            }
+            push_text_px(&mut draw.cells, close_x, base, "×", dim(), cw);
+            self.hits.push((close_region, Hit::ViewerTabClose(kind)));
 
             x += seg_w + tab_gap;
         }
@@ -1236,7 +1547,7 @@ impl Chrome {
 }
 
 /// Solid window-pixel rectangle.
-fn rect(x: f32, y: f32, w: f32, h: f32, color: Rgb) -> RenderRect {
+pub(crate) fn rect(x: f32, y: f32, w: f32, h: f32, color: Rgb) -> RenderRect {
     RenderRect::new(x, y, w, h, color, 1.)
 }
 
@@ -1251,20 +1562,36 @@ fn push_border(rects: &mut Vec<RenderRect>, x: f32, y: f32, w: f32, h: f32, colo
 /// Text baseline (window pixels) that vertically centres a `ch`-tall line within a row of height
 /// `row_h` starting at `row_top`. The renderer places a glyph's baseline at the bottom of its cell,
 /// so this is the bottom of the centred line box.
-fn baseline(row_top: f32, row_h: f32, ch: f32) -> f32 {
+pub(crate) fn baseline(row_top: f32, row_h: f32, ch: f32) -> f32 {
     row_top + (row_h + ch) * 0.5
 }
 
 /// Emit `text` as glyphs at absolute window pixels, starting at `(x, baseline)` and advancing by
 /// `advance` pixels per cell (2× for wide glyphs). Cells carry pixel positions, so the chrome pass
 /// must render them with a 1×1-pixel cell projection. Returns the x pixel after the last glyph.
-fn push_text_px(
+pub(crate) fn push_text_px(
     cells: &mut Vec<RenderableCell>,
     x: f32,
     baseline: f32,
     text: &str,
     fg: Rgb,
     advance: f32,
+) -> f32 {
+    push_text_px_styled(cells, x, baseline, text, fg, advance, false, false)
+}
+
+/// Like [`push_text_px`], with bold/italic font styling (rendered via the glyph cache's font
+/// variants).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_text_px_styled(
+    cells: &mut Vec<RenderableCell>,
+    x: f32,
+    baseline: f32,
+    text: &str,
+    fg: Rgb,
+    advance: f32,
+    bold: bool,
+    italic: bool,
 ) -> f32 {
     // The shader puts the baseline one cell below the cell origin (cell height is 1px here).
     let row = (baseline.round() as usize).saturating_sub(1);
@@ -1274,7 +1601,13 @@ fn push_text_px(
         if width == 0 {
             continue;
         }
-        let flags = if width == 2 { Flags::WIDE_CHAR } else { Flags::empty() };
+        let mut flags = if width == 2 { Flags::WIDE_CHAR } else { Flags::empty() };
+        if bold {
+            flags.insert(Flags::BOLD);
+        }
+        if italic {
+            flags.insert(Flags::ITALIC);
+        }
         cells.push(RenderableCell {
             point: Point::new(row, Column(x.round().max(0.) as usize)),
             character: ch,
@@ -1291,12 +1624,12 @@ fn push_text_px(
 }
 
 /// Display width of `text` in cells.
-fn str_width(text: &str) -> usize {
+pub(crate) fn str_width(text: &str) -> usize {
     text.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
 /// Truncate `text` to at most `max` display cells, appending an ellipsis when shortened.
-fn truncate(text: &str, max: usize) -> String {
+pub(crate) fn truncate(text: &str, max: usize) -> String {
     if str_width(text) <= max {
         return text.to_owned();
     }

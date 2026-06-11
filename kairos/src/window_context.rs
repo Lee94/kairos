@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossfont::Size as FontSize;
 use glutin::config::Config as GlutinConfig;
@@ -41,16 +41,18 @@ use crate::config::persist::{self, ShellChoice};
 use crate::config::ui_config::Program;
 use crate::claude_sessions::{self, ClaudeSession};
 use crate::display::chrome::{SettingsState, ShellPreset};
+use crate::display::project_pane::ProjectPaneData;
 use crate::display::window::Window;
 use crate::display::{ClaudeSessionRow, Display, SizeInfo, TabBarInfo};
 use crate::event::{
     ActionContext, Event, EventProxy, EventType, InlineSearchState, Mouse, SearchState,
     TabSelection, TouchPurpose,
 };
+use crate::git_worker::{GitData, GitWorker};
 #[cfg(unix)]
 use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::MessageBuffer;
-use crate::scheduler::Scheduler;
+use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::session::{SavedProject, SavedTab, SavedWindow};
 use crate::{input, renderer};
 
@@ -225,6 +227,9 @@ struct Project {
     /// Cached Claude Code sessions for this project's `root`, shown in the sidebar. Refreshed when
     /// the project is selected (never per frame); empty for the root-less home project.
     sessions: Vec<ClaudeSession>,
+    /// Cached data for the right-side project pane (file tree, git changes, diffs), fed by the
+    /// background git worker and passed to the renderer by reference each frame.
+    pane: ProjectPaneData,
 }
 
 impl Project {
@@ -268,6 +273,8 @@ pub struct WindowContext {
     occluded: bool,
     window_config: ParsedOptions,
     config: Rc<UiConfig>,
+    /// Background thread answering git queries for the project pane.
+    git_worker: GitWorker,
 }
 
 impl WindowContext {
@@ -382,6 +389,9 @@ impl WindowContext {
         // Windows launched to run a specific command are one-offs and never persisted.
         let persistent = options.terminal_options.command().is_none();
 
+        // The git worker outlives every project; it answers for whichever root is queried.
+        let git_worker = GitWorker::spawn(display.window.id(), proxy.clone());
+
         // Create the initial tab (terminal) for this window.
         let tab = Tab::new(&config, &options, &display.size_info, display.window.id(), proxy)?;
 
@@ -389,6 +399,7 @@ impl WindowContext {
         let root = options.terminal_options.working_directory.clone();
         let project = Project {
             name: Project::name_for(&root),
+            pane: ProjectPaneData::new(root.clone()),
             root,
             tabs: vec![tab],
             active_tab: 0,
@@ -403,6 +414,7 @@ impl WindowContext {
             active_project: 0,
             session_key: 0,
             persistent,
+            git_worker,
             cursor_blink_timed_out: Default::default(),
             prev_bell_cmd: Default::default(),
             message_buffer: Default::default(),
@@ -415,8 +427,10 @@ impl WindowContext {
             dirty: Default::default(),
         };
 
-        // Populate the active project's Claude session list for the sidebar.
+        // Populate the active project's Claude session list for the sidebar and kick off the
+        // first git status query for the project pane.
         window_context.refresh_project_sessions(0);
+        window_context.refresh_pane_git();
 
         Ok(window_context)
     }
@@ -482,6 +496,8 @@ impl WindowContext {
             width: size.width,
             height: size.height,
             active_project: self.active_project,
+            pane_visible: self.display.pane_visible(),
+            pane_cols: self.display.pane_cols(),
             projects,
         }
     }
@@ -508,11 +524,13 @@ impl WindowContext {
         // Configure the bootstrap project (index 0, already holding tab 0) from `saved[0]`.
         self.projects[0].name = saved[0].name.clone();
         self.projects[0].root = saved[0].root.clone();
+        self.projects[0].pane = ProjectPaneData::new(saved[0].root.clone());
 
         // Add placeholder projects for the rest; tabs are spawned below.
         for sp in saved.iter().skip(1) {
             self.projects.push(Project {
                 name: sp.name.clone(),
+                pane: ProjectPaneData::new(sp.root.clone()),
                 root: sp.root.clone(),
                 tabs: Vec::new(),
                 active_tab: 0,
@@ -556,6 +574,7 @@ impl WindowContext {
         self.projects.retain(|p| !p.tabs.is_empty());
         self.active_project = active_project.min(self.projects.len().saturating_sub(1));
         self.refresh_project_sessions(self.active_project);
+        self.refresh_pane_git();
         self.sync_tabs();
     }
 
@@ -596,6 +615,8 @@ impl WindowContext {
                 let project = &mut self.projects[project_index];
                 project.tabs.push(tab);
                 project.active_tab = project.tabs.len() - 1;
+                // The new terminal takes focus, including from a focused viewer tab.
+                self.display.unfocus_viewer();
                 // The tab bar may have just appeared; recompute layout and redraw.
                 self.display.pending_update.dirty = true;
                 self.dirty = true;
@@ -669,6 +690,7 @@ impl WindowContext {
                 let name = Project::name_for(&Some(root.clone()));
                 self.projects.push(Project {
                     name,
+                    pane: ProjectPaneData::new(Some(root.clone())),
                     root: Some(root),
                     tabs: vec![tab],
                     active_tab: 0,
@@ -692,6 +714,114 @@ impl WindowContext {
         };
     }
 
+    /// Queue a git status refresh for the active project's pane (no-op while the pane is hidden
+    /// or for the root-less home project).
+    pub fn refresh_pane_git(&mut self) {
+        if !self.display.pane_visible() {
+            return;
+        }
+        let Some(root) = self.active_project().root.clone() else { return };
+        self.git_worker.request_refresh(root);
+    }
+
+    /// Apply a background git result to every project with the root it was computed for —
+    /// duplicate-root projects are legal and must all stay current. Results for a root no longer
+    /// hosted in this window (e.g. its project was closed) are dropped.
+    pub fn apply_pane_git_data(&mut self, root: PathBuf, data: GitData) {
+        let matches: Vec<usize> = self
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.root.as_deref() == Some(root.as_path()))
+            .map(|(i, _)| i)
+            .collect();
+        if matches.is_empty() {
+            return;
+        }
+
+        let selected = self.display.pane_selected();
+        let is_status = matches!(data, GitData::Status { .. });
+        let difft_failed = matches!(data, GitData::Difft { lines: None, .. });
+        for &index in &matches {
+            match data.clone() {
+                GitData::Status { changed, ignored, is_repo } => {
+                    self.projects[index].pane.apply_status(changed, ignored, is_repo,
+                        selected.as_deref());
+                },
+                GitData::Diff { file, lines } => self.projects[index].pane.apply_diff(file, lines),
+                GitData::Difft { file, split, lines } => {
+                    self.projects[index].pane.apply_difft(file, split, lines);
+                },
+            }
+        }
+
+        // Redraw only when the result affects the project currently on screen.
+        if matches.contains(&self.active_project) {
+            // A status refresh invalidates the open file's retained diff data; fetch a fresh
+            // result to replace it in place.
+            if is_status && selected.is_some() {
+                self.ensure_diff_data(true);
+            }
+
+            // difft turned out to be unavailable: fall back to the builtin diff.
+            if difft_failed {
+                self.ensure_diff_data(false);
+            }
+
+            self.display.pending_update.dirty = true;
+            self.dirty = true;
+            if self.display.window.has_frame {
+                self.display.window.request_redraw();
+            }
+        }
+    }
+
+    /// Point the shared diff tab at the changed file `path`, requesting any missing diff data.
+    fn toggle_pane_change(&mut self, path: &str) {
+        if self.projects[self.active_project].pane.changed_by_path(path).is_none() {
+            return;
+        }
+        self.display.open_diff_viewer(path);
+        self.ensure_diff_data(false);
+        self.dirty = true;
+    }
+
+    /// Queue whatever data the open diff viewer is missing: the difftastic rendering of the
+    /// current `(file, layout)` when difft mode is active, the builtin parsed diff otherwise.
+    /// `force` re-requests even when a (possibly stale) result is already cached, so the
+    /// periodic git refresh replaces the entry in place.
+    fn ensure_diff_data(&mut self, force: bool) {
+        let project = &self.projects[self.active_project];
+        let Some(root) = project.root.clone() else { return };
+        let Some(path) = self.display.pane_selected() else { return };
+        let Some(file) = project.pane.changed_by_path(&path).cloned() else { return };
+
+        if self.display.viewer_difft() && !project.pane.difft_missing() {
+            let split = self.display.viewer_split();
+            if force || !project.pane.has_difft(&path, split) {
+                let width = self.display.viewer_text_cols();
+                self.git_worker.request_difft(root, path, split, width);
+            }
+        } else if force || !project.pane.has_diff(&path) {
+            self.git_worker.request_diff(root, file);
+        }
+    }
+
+    /// Point the shared 预览 tab at the project file `path`, (re)loading its content from disk.
+    fn toggle_pane_preview(&mut self, path: &str) {
+        self.display.open_file_preview(path);
+        self.reload_preview(path);
+        self.dirty = true;
+    }
+
+    /// (Re)load the previewed file's content, honoring the markdown view mode and the viewer's
+    /// current width (used to wrap rendered markdown).
+    fn reload_preview(&mut self, path: &str) {
+        let width = self.display.viewer_text_cols();
+        let md_source = self.display.md_source();
+        self.projects[self.active_project].pane.load_preview(path, width, md_source);
+    }
+
     /// Switch the active project, carrying focus and updating the window title.
     pub fn select_project(&mut self, index: usize) {
         if index >= self.projects.len() {
@@ -702,7 +832,9 @@ impl WindowContext {
         self.refresh_project_sessions(index);
 
         if index == self.active_project {
-            // Already active; the refreshed session list may need a redraw.
+            // Already active; the refreshed session list may need a redraw, and re-clicking also
+            // refreshes the pane's git data.
+            self.refresh_pane_git();
             self.display.pending_update.dirty = true;
             self.dirty = true;
             return;
@@ -725,6 +857,11 @@ impl WindowContext {
         if !preserve_title && self.config.window.dynamic_title && !title.is_empty() {
             self.display.window.set_title(title);
         }
+
+        // The pane now shows the new project: drop the old project's view state (scrolls,
+        // expanded diff, folds) and bring the new one's git data up to date.
+        self.display.pane_reset_view();
+        self.refresh_pane_git();
 
         self.display.pending_update.dirty = true;
         self.dirty = true;
@@ -863,6 +1000,9 @@ impl WindowContext {
 
     /// Focus the tab at `index` within the active project.
     fn set_active_tab(&mut self, index: usize) {
+        // Tab switches always return to the terminal, even from a focused viewer tab.
+        self.display.unfocus_viewer();
+
         let project_index = self.active_project;
         if index == self.projects[project_index].active_tab {
             return;
@@ -1065,8 +1205,11 @@ impl WindowContext {
         // Redraw the window using the currently active tab.
         let tab_bar = self.tab_bar_info();
         let project_index = self.active_project;
-        let idx = self.projects[project_index].active_tab;
-        let tab = &mut self.projects[project_index].tabs[idx];
+        let project = &mut self.projects[project_index];
+        let idx = project.active_tab;
+        // The pane only renders for projects with a root folder; passing `None` hides it.
+        let pane_data = if project.root.is_some() { Some(&project.pane) } else { None };
+        let tab = &mut project.tabs[idx];
         let terminal = tab.terminal.lock();
         self.display.draw(
             terminal,
@@ -1075,6 +1218,7 @@ impl WindowContext {
             &self.config,
             &mut tab.search_state,
             &tab_bar,
+            pane_data,
         );
 
         // Dispatch tab-bar actions egui produced this frame through the normal event path (so they
@@ -1131,6 +1275,44 @@ impl WindowContext {
             self.display.toggle_sidebar();
             self.dirty = true;
         }
+        if actions.toggle_pane {
+            // Refresh on reveal so the pane never shows stale git data.
+            if self.display.toggle_project_pane() {
+                self.refresh_pane_git();
+            }
+            self.dirty = true;
+        }
+        if let Some(path) = actions.pane_toggle_dir {
+            self.projects[self.active_project].pane.toggle_dir(&path);
+            self.display.pending_update.dirty = true;
+            self.dirty = true;
+        }
+        if let Some(path) = actions.pane_toggle_diff {
+            self.toggle_pane_change(&path);
+        }
+        if let Some(path) = actions.pane_preview {
+            self.toggle_pane_preview(&path);
+        }
+        if let Some(split) = actions.viewer_layout {
+            self.display.set_viewer_layout(split);
+            self.ensure_diff_data(false);
+            self.dirty = true;
+        }
+        if actions.viewer_toggle_difft {
+            // Re-enabling difft retries the tool even after a recorded failure.
+            if self.display.toggle_viewer_difft() {
+                self.projects[self.active_project].pane.clear_difft_missing();
+            }
+            self.ensure_diff_data(false);
+            self.dirty = true;
+        }
+        if actions.viewer_toggle_md_source {
+            self.display.toggle_md_source();
+            if let Some(path) = self.display.previewed_file() {
+                self.reload_preview(&path);
+            }
+            self.dirty = true;
+        }
         if actions.open_settings {
             let family = self.config.font.normal().family.clone();
             let size_pt = self.config.font.size().as_pt();
@@ -1146,6 +1328,21 @@ impl WindowContext {
         // The chrome's reserved size changed; recompute the terminal layout so it fits beside it.
         if actions.layout_changed {
             self.sync_tabs();
+        }
+
+        // Keep a low-frequency git refresh ticking while the pane is shown for a rooted project,
+        // so external changes (commits, edits from other tools) appear without interaction.
+        let timer_id = TimerId::new(Topic::PaneGitRefresh, window_id);
+        let want_timer = self.display.pane_visible() && self.active_project().root.is_some();
+        if want_timer && !scheduler.scheduled(timer_id) {
+            scheduler.schedule(
+                Event::new(EventType::PaneGitRefresh, window_id),
+                Duration::from_secs(5),
+                true,
+                timer_id,
+            );
+        } else if !want_timer && scheduler.scheduled(timer_id) {
+            scheduler.unschedule(timer_id);
         }
     }
 

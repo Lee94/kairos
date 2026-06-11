@@ -34,10 +34,13 @@ mod config;
 mod daemon;
 mod display;
 mod event;
+mod git_worker;
+mod highlight;
 mod input;
 mod logging;
 #[cfg(target_os = "macos")]
 mod macos;
+mod markdown;
 mod message_bar;
 mod migrate;
 #[cfg(windows)]

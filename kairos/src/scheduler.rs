@@ -29,6 +29,8 @@ pub enum Topic {
     BlinkCursor,
     BlinkTimeout,
     Frame,
+    /// Periodic git status refresh for the project pane.
+    PaneGitRefresh,
 }
 
 /// Event scheduled to be emitted at a specific time.

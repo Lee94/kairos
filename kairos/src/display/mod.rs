@@ -52,6 +52,7 @@ use crate::display::damage::{DamageTracker, damage_y_to_viewport_y};
 use crate::display::hint::{HintMatch, HintState};
 use crate::display::chrome::{Chrome, Hit, PaletteCmd, SettingsState};
 use crate::display::meter::Meter;
+use crate::display::project_pane::{PaneTab, ProjectPaneData};
 use crate::display::window::Window;
 use crate::event::{Event, EventType, Mouse, SearchState};
 use crate::message_bar::{MessageBuffer, MessageType};
@@ -70,6 +71,7 @@ mod bell;
 pub mod chrome;
 mod damage;
 mod meter;
+pub mod project_pane;
 
 /// Label for the forward terminal search bar.
 const FORWARD_SEARCH_LABEL: &str = "Search: ";
@@ -172,6 +174,10 @@ pub struct SizeInfo<T = f32> {
     /// Extra horizontal pixels reserved on the left edge for the egui project sidebar.
     left_extra: T,
 
+    /// Extra horizontal pixels reserved on the right edge for the project pane.
+    #[serde(default)]
+    right_extra: T,
+
     /// Number of lines in the viewport.
     screen_lines: usize,
 
@@ -190,6 +196,7 @@ impl From<SizeInfo<f32>> for SizeInfo<u32> {
             padding_y: size_info.padding_y as u32,
             top_extra: size_info.top_extra as u32,
             left_extra: size_info.left_extra as u32,
+            right_extra: size_info.right_extra as u32,
             screen_lines: size_info.screen_lines,
             // NOTE: pre-existing upstream quirk — this mirrors `screen_lines`, not `columns`.
             columns: size_info.screen_lines,
@@ -248,6 +255,11 @@ impl<T: Clone + Copy> SizeInfo<T> {
     pub fn left_extra(&self) -> T {
         self.left_extra
     }
+
+    #[inline]
+    pub fn right_extra(&self) -> T {
+        self.right_extra
+    }
 }
 
 impl SizeInfo<f32> {
@@ -281,6 +293,7 @@ impl SizeInfo<f32> {
             padding_y: padding_y.floor(),
             top_extra: 0.,
             left_extra: 0.,
+            right_extra: 0.,
             screen_lines,
             columns,
         }
@@ -315,7 +328,24 @@ impl SizeInfo<f32> {
     #[inline]
     pub fn reserve_left_cols(&mut self, width: f32) {
         self.left_extra = width;
-        let columns = (self.width - 2. * self.padding_x - self.left_extra) / self.cell_width;
+        self.recompute_columns();
+    }
+
+    /// Reserve `width` pixels at the right of the window (for the project pane), removing the
+    /// covered columns from the grid. The grid stays left-anchored.
+    #[inline]
+    pub fn reserve_right_cols(&mut self, width: f32) {
+        self.right_extra = width;
+        self.recompute_columns();
+    }
+
+    /// Recompute the column count from the width left over after padding and both horizontal
+    /// chrome reservations, so the left/right reserve calls are order-independent.
+    #[inline]
+    fn recompute_columns(&mut self) {
+        let columns =
+            (self.width - 2. * self.padding_x - self.left_extra - self.right_extra)
+                / self.cell_width;
         self.columns = cmp::max(columns as usize, MIN_COLUMNS);
     }
 
@@ -461,6 +491,20 @@ pub struct ChromeActions {
     pub open_settings: bool,
     /// Toggle the project sidebar (from the command palette).
     pub toggle_sidebar: bool,
+    /// Toggle the right-side project pane (from the command palette).
+    pub toggle_pane: bool,
+    /// Expand/collapse the pane's file-tree directory with this root-relative path.
+    pub pane_toggle_dir: Option<String>,
+    /// Toggle the center viewer's diff for the changed file with this root-relative path.
+    pub pane_toggle_diff: Option<String>,
+    /// Toggle the center viewer's file preview for this root-relative path.
+    pub pane_preview: Option<String>,
+    /// Switch the viewer's diff layout (`false` = unified 行间, `true` = side-by-side 分栏).
+    pub viewer_layout: Option<bool>,
+    /// Toggle difftastic rendering for the viewer's diff.
+    pub viewer_toggle_difft: bool,
+    /// Toggle the markdown preview between rendered output and source text.
+    pub viewer_toggle_md_source: bool,
     /// A settings-panel change to apply live and persist to disk.
     pub settings: Option<SettingsState>,
     /// The chrome's reserved size (top bar height or sidebar width) changed; the terminal layout
@@ -546,6 +590,8 @@ pub struct Display {
     chrome_sidebar_width: f32,
     /// Physical-pixel height reserved at the bottom for the git status bar (0 when hidden).
     chrome_status_height: f32,
+    /// Physical-pixel width reserved on the right for the project pane (0 when hidden).
+    chrome_pane_width: f32,
 }
 
 impl Display {
@@ -685,6 +731,7 @@ impl Display {
             chrome_bar_height: 0.,
             chrome_sidebar_width: 0.,
             chrome_status_height: 0.,
+            chrome_pane_width: 0.,
             context: ManuallyDrop::new(context),
             visual_bell: VisualBell::from(&config.bell),
             renderer: ManuallyDrop::new(renderer),
@@ -900,6 +947,9 @@ impl Display {
         // Reserve space at the left for the project sidebar.
         new_size.reserve_left_cols(self.chrome_sidebar_width);
 
+        // Reserve space at the right for the project pane.
+        new_size.reserve_right_cols(self.chrome_pane_width);
+
         // Reserve space at the bottom for the git status bar.
         new_size.reserve_bottom_px(self.chrome_status_height);
 
@@ -973,6 +1023,7 @@ impl Display {
     /// A reference to Term whose state is being drawn must be provided.
     ///
     /// This call may block if vsync is enabled.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw<T: EventListener>(
         &mut self,
         mut terminal: MutexGuard<'_, Term<T>>,
@@ -981,6 +1032,7 @@ impl Display {
         config: &UiConfig,
         search_state: &mut SearchState,
         tab_bar: &TabBarInfo,
+        pane_data: Option<&ProjectPaneData>,
     ) {
         // Collect renderable content before the terminal is dropped.
         let mut content = RenderableContent::new(config, self, &terminal, search_state);
@@ -1229,8 +1281,9 @@ impl Display {
             self.renderer.draw_rects(&self.size_info, &metrics, rects);
         }
 
-        // Render the native chrome (tab bar, sidebar, context menu) over the terminal.
-        self.draw_chrome(tab_bar);
+        // Render the native chrome (tab bar, sidebar, project pane, context menu) over the
+        // terminal.
+        self.draw_chrome(tab_bar, pane_data);
 
         // Clearing debug highlights from the previous frame requires full redraw.
         self.swap_buffers();
@@ -1533,7 +1586,7 @@ impl Display {
     /// Offer a winit window event to the native chrome. Returns whether the chrome consumed it
     /// (in which case it must not also reach the terminal).
     pub fn handle_chrome_event(&mut self, event: &winit::event::WindowEvent) -> bool {
-        use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
+        use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
         use winit::keyboard::{Key, NamedKey};
 
         match event {
@@ -1551,25 +1604,59 @@ impl Display {
                     self.pending_update.dirty = true;
                     return true;
                 }
-                // Hovering the divider shows the resize cursor; consume so the terminal doesn't
+                // Same for the project pane's left edge.
+                if self.chrome.is_dragging_pane_divider() {
+                    self.chrome.drag_pane_divider_to(x, cw);
+                    self.window.set_mouse_cursor(CursorIcon::ColResize);
+                    self.pending_update.dirty = true;
+                    return true;
+                }
+                // Hovering a divider shows the resize cursor; consume so the terminal doesn't
                 // immediately overwrite it with the text cursor.
-                if self.chrome.over_divider(x) {
+                if self.chrome.over_divider(x) || self.chrome.over_pane_divider(x) {
                     self.window.set_mouse_cursor(CursorIcon::ColResize);
                     return true;
                 }
                 // Never consume other movement; the terminal still tracks the cursor.
                 false
             },
+            // Scroll the project pane or the center viewer when the wheel turns over them.
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (x, y) = self.chrome.last_mouse();
+                let over_pane = self.chrome.pane_contains(x, y);
+                let over_viewer = self.chrome.viewer_contains(x, y);
+                if !over_pane && !over_viewer {
+                    return false;
+                }
+                let rows = match delta {
+                    MouseScrollDelta::LineDelta(_, lines) => -lines * 3.,
+                    MouseScrollDelta::PixelDelta(pos) => {
+                        -(pos.y as f32) / self.chrome_cell_size.1.max(1.)
+                    },
+                };
+                if over_pane {
+                    self.chrome.scroll_pane(rows);
+                } else {
+                    self.chrome.scroll_viewer(rows);
+                }
+                self.pending_update.dirty = true;
+                true
+            },
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
-                // Grab the divider before any control hit-test: its zone sits at the sidebar's right
-                // edge, clear of the project rows' buttons.
+                // Grab a divider before any control hit-test: their zones sit at the panel edges,
+                // clear of the rows' buttons.
                 let (x, _) = self.chrome.last_mouse();
                 if self.chrome.over_divider(x) {
                     self.chrome.begin_divider_drag();
+                    self.window.set_mouse_cursor(CursorIcon::ColResize);
+                    return true;
+                }
+                if self.chrome.over_pane_divider(x) {
+                    self.chrome.begin_pane_divider_drag();
                     self.window.set_mouse_cursor(CursorIcon::ColResize);
                     return true;
                 }
@@ -1596,7 +1683,9 @@ impl Display {
             } => {
                 // Only consume the release that ends a divider drag; let the terminal see every
                 // other release (e.g. to finish a selection).
-                self.chrome.end_divider_drag()
+                let sidebar_drag = self.chrome.end_divider_drag();
+                let pane_drag = self.chrome.end_pane_divider_drag();
+                sidebar_drag || pane_drag
             },
             WindowEvent::KeyboardInput { event: key_event, .. } => {
                 let pressed = key_event.state == ElementState::Pressed;
@@ -1648,10 +1737,11 @@ impl Display {
                     }
                     return true;
                 }
-                // Escape closes an open context menu; only consume the key when one was open.
+                // Escape closes an open context menu, or hands focus from a viewer tab back to
+                // the terminal; only consume the key when it did one of those.
                 if pressed
                     && *key == Key::Named(NamedKey::Escape)
-                    && self.chrome.context_menu.take().is_some()
+                    && (self.chrome.context_menu.take().is_some() || self.chrome.unfocus_viewer())
                 {
                     self.pending_update.dirty = true;
                     return true;
@@ -1688,13 +1778,52 @@ impl Display {
     /// Translate a chrome hit into a queued [`ChromeActions`] entry.
     fn apply_chrome_hit(&mut self, hit: Hit) {
         match hit {
-            Hit::SelectTab(id) => self.chrome_actions.select = Some(id),
+            // Selecting or creating a terminal tab takes focus back from the viewer tabs.
+            Hit::SelectTab(id) => {
+                self.chrome.unfocus_viewer();
+                self.chrome_actions.select = Some(id);
+            },
             Hit::CloseTab(id) => self.chrome_actions.close = Some(id),
-            Hit::CreateTab => self.chrome_actions.create = true,
+            Hit::CreateTab => {
+                self.chrome.unfocus_viewer();
+                self.chrome_actions.create = true;
+            },
             Hit::SelectProject(i) => self.chrome_actions.select_project = Some(i),
             Hit::CloseProject(i) => self.chrome_actions.close_project = Some(i),
             Hit::CreateProject => self.chrome_actions.create_project = true,
             Hit::OpenClaudeSession(i) => self.chrome_actions.open_claude_session = Some(i),
+            // Pane tab switches are pure chrome state; row clicks need project data, so they go
+            // through the action queue like every other window-level operation. Row indices are
+            // resolved to paths against the same layout pass that registered the hit regions, so
+            // a git refresh landing in between can't redirect the click to another entry.
+            Hit::PaneShowFiles => self.chrome.pane_set_tab(PaneTab::Files),
+            Hit::PaneShowChanges => self.chrome.pane_set_tab(PaneTab::Changes),
+            // A tree row is either a directory (expand/collapse) or a file (preview in the
+            // center viewer); the snapshots resolve which one was registered at this index.
+            Hit::PaneFileRow(i) => {
+                if let Some(dir) = self.chrome.pane_dir_path(i) {
+                    self.chrome_actions.pane_toggle_dir = Some(dir);
+                } else if let Some(file) = self.chrome.pane_file_path(i) {
+                    self.chrome_actions.pane_preview = Some(file);
+                }
+            },
+            Hit::PaneChangeRow(i) => {
+                self.chrome_actions.pane_toggle_diff = self.chrome.pane_change_path(i);
+            },
+            Hit::ViewerTab(kind) => self.chrome.focus_viewer(kind),
+            Hit::ViewerTabClose(kind) => self.chrome.close_viewer_tab(kind),
+            Hit::ViewerClose => {
+                self.chrome.close_focused_viewer();
+            },
+            // Layout/engine switches go through the action queue: difftastic renderings are
+            // produced per (file, layout) by the git worker, so the window may need to queue a
+            // request when the variant isn't cached yet.
+            Hit::ViewerUnified => self.chrome_actions.viewer_layout = Some(false),
+            Hit::ViewerSplit => self.chrome_actions.viewer_layout = Some(true),
+            Hit::ViewerDifft => self.chrome_actions.viewer_toggle_difft = true,
+            Hit::ViewerMdSource => self.chrome_actions.viewer_toggle_md_source = true,
+            // Clicks on the viewer's body are consumed so they never reach the terminal.
+            Hit::ViewerBackground => {},
             Hit::Copy => self.chrome_actions.copy = true,
             Hit::Paste => self.chrome_actions.paste = true,
             Hit::PaletteSelect(i) => {
@@ -1738,6 +1867,7 @@ impl Display {
             PaletteCmd::NewTab => self.chrome_actions.create = true,
             PaletteCmd::NewProject => self.chrome_actions.create_project = true,
             PaletteCmd::ToggleSidebar => self.chrome_actions.toggle_sidebar = true,
+            PaletteCmd::ToggleProjectPane => self.chrome_actions.toggle_pane = true,
         }
     }
 
@@ -1749,6 +1879,108 @@ impl Display {
     /// Toggle the project sidebar's visibility and trigger a relayout.
     pub fn toggle_sidebar(&mut self) {
         self.chrome.toggle_sidebar();
+        self.pending_update.dirty = true;
+    }
+
+    /// Toggle the right-side project pane's visibility and trigger a relayout. Returns whether
+    /// the pane is now visible (so the window can kick off a git refresh).
+    pub fn toggle_project_pane(&mut self) -> bool {
+        self.chrome.toggle_pane();
+        self.pending_update.dirty = true;
+        self.chrome.pane_visible
+    }
+
+    /// Open (or retarget) the shared diff tab to the changed file `path` and focus it.
+    pub fn open_diff_viewer(&mut self, path: &str) {
+        self.pending_update.dirty = true;
+        self.chrome.open_diff_viewer(path);
+    }
+
+    /// Open (or retarget) the shared 预览 tab to `path` and focus it.
+    pub fn open_file_preview(&mut self, path: &str) {
+        self.pending_update.dirty = true;
+        self.chrome.open_file_preview(path);
+    }
+
+    /// Hand focus from a viewer tab back to the terminal (e.g. on terminal tab switches).
+    pub fn unfocus_viewer(&mut self) {
+        if self.chrome.unfocus_viewer() {
+            self.pending_update.dirty = true;
+        }
+    }
+
+    /// Switch the viewer's diff layout between unified and side-by-side.
+    pub fn set_viewer_layout(&mut self, split: bool) {
+        self.pending_update.dirty = true;
+        self.chrome.set_viewer_split(split);
+    }
+
+    /// Whether the viewer's diff uses the side-by-side layout.
+    pub fn viewer_split(&self) -> bool {
+        self.chrome.viewer_split()
+    }
+
+    /// Toggle difftastic rendering for the viewer's diff, returning the new state.
+    pub fn toggle_viewer_difft(&mut self) -> bool {
+        self.pending_update.dirty = true;
+        self.chrome.toggle_viewer_difft()
+    }
+
+    /// Whether the viewer renders diffs with difftastic.
+    pub fn viewer_difft(&self) -> bool {
+        self.chrome.viewer_difft()
+    }
+
+    /// Toggle the markdown preview between rendered output and source, returning whether the
+    /// source view is now active.
+    pub fn toggle_md_source(&mut self) -> bool {
+        self.pending_update.dirty = true;
+        self.chrome.toggle_md_source()
+    }
+
+    /// Whether the markdown preview shows source text instead of rendered output.
+    pub fn md_source(&self) -> bool {
+        self.chrome.md_source()
+    }
+
+    /// Path of the file shown in the center viewer's preview, if any.
+    pub fn previewed_file(&self) -> Option<String> {
+        self.chrome.previewed_file().map(str::to_owned)
+    }
+
+    /// Width of the viewer's text area in chrome cells (terminal columns), for sizing
+    /// difftastic's output. Derived from the last frame's reserved chrome sizes.
+    pub fn viewer_text_cols(&self) -> usize {
+        let w = self.size_info.width() - self.chrome_sidebar_width - self.chrome_pane_width;
+        let cols = (w / self.chrome_cell_size.0.max(1.)).floor() as usize;
+        // Horizontal padding on both sides plus the scrollbar gutter.
+        cols.saturating_sub(3).max(40)
+    }
+
+    /// Relative path of the changed file whose diff the center viewer shows, if any.
+    pub fn pane_selected(&self) -> Option<String> {
+        self.chrome.pane_selected().map(str::to_owned)
+    }
+
+    /// Whether the project pane is currently visible.
+    pub fn pane_visible(&self) -> bool {
+        self.chrome.pane_visible
+    }
+
+    /// The project pane's width in chrome cells, for session persistence.
+    pub fn pane_cols(&self) -> f32 {
+        self.chrome.pane_cols()
+    }
+
+    /// Restore the pane's visibility and width from a saved session.
+    pub fn set_pane_state(&mut self, visible: bool, cols: f32) {
+        self.chrome.set_pane_state(visible, cols);
+        self.pending_update.dirty = true;
+    }
+
+    /// Reset the pane's view state (scrolls, expanded diff, folds) when the shown project changes.
+    pub fn pane_reset_view(&mut self) {
+        self.chrome.pane_reset_view();
         self.pending_update.dirty = true;
     }
 
@@ -1764,13 +1996,14 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
-    /// Render the native chrome (tab bar, sidebar, context menu) over the terminal grid.
-    fn draw_chrome(&mut self, tab_bar: &TabBarInfo) {
+    /// Render the native chrome (tab bar, sidebar, project pane, context menu) over the terminal
+    /// grid.
+    fn draw_chrome(&mut self, tab_bar: &TabBarInfo, pane_data: Option<&ProjectPaneData>) {
         let (chrome_cw, chrome_ch) = self.chrome_cell_size;
         let win_w = self.size_info.width();
         let win_h = self.size_info.height();
 
-        let draw = self.chrome.layout(tab_bar, chrome_cw, chrome_ch, win_w, win_h);
+        let draw = self.chrome.layout(tab_bar, pane_data, chrome_cw, chrome_ch, win_w, win_h);
 
         // Anchor the IME candidate window to the palette's search caret while it's open, so CJK
         // composition appears under the search box rather than at the terminal cursor.
@@ -1825,6 +2058,13 @@ impl Display {
         // Feed the reserved status-bar height back into the layout so the terminal sits above it.
         if (draw.status_height - self.chrome_status_height).abs() > f32::EPSILON {
             self.chrome_status_height = draw.status_height;
+            self.chrome_actions.layout_changed = true;
+            self.pending_update.dirty = true;
+        }
+
+        // Feed the reserved pane width back into the layout so the terminal sits to its left.
+        if (draw.pane_width - self.chrome_pane_width).abs() > f32::EPSILON {
+            self.chrome_pane_width = draw.pane_width;
             self.chrome_actions.layout_changed = true;
             self.pending_update.dirty = true;
         }
