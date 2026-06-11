@@ -82,3 +82,36 @@ that.
 Kairos supports running multiple terminal emulators from the same Kairos
 instance. New windows can be created either by using the `CreateNewWindow`
 keybinding action, or by executing the `kairos msg create-window` subcommand.
+
+## Split Panes
+
+Every tab can host multiple terminals at once, arranged as arbitrarily nested
+horizontal and vertical splits (tmux-style). Splits, the pane layout and each
+pane's working directory are part of session persistence, so they are restored
+on the next launch.
+
+Default bindings on Windows/Linux (macOS in parentheses):
+
+- Split right: <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>d</kbd>
+  (<kbd>Command</kbd> <kbd>d</kbd>)
+- Split down: <kbd>Alt</kbd> <kbd>Shift</kbd> <kbd>d</kbd>
+  (<kbd>Command</kbd> <kbd>Shift</kbd> <kbd>d</kbd>)
+- Close pane (the tab when it is the last pane): <kbd>Ctrl</kbd>
+  <kbd>Shift</kbd> <kbd>w</kbd> (<kbd>Command</kbd> <kbd>Shift</kbd>
+  <kbd>w</kbd>)
+- Move focus between panes: <kbd>Alt</kbd> <kbd>Arrows</kbd>
+  (<kbd>Command</kbd> <kbd>Option</kbd> <kbd>Arrows</kbd>)
+- Resize the focused pane one cell at a time: <kbd>Alt</kbd> <kbd>Shift</kbd>
+  <kbd>Arrows</kbd> (<kbd>Command</kbd> <kbd>Ctrl</kbd> <kbd>Arrows</kbd>)
+- Maximize/restore the focused pane: <kbd>Ctrl</kbd> <kbd>Shift</kbd>
+  <kbd>Enter</kbd> (<kbd>Command</kbd> <kbd>Shift</kbd> <kbd>Enter</kbd>)
+
+Panes can also be focused by clicking into them and resized by dragging the
+divider between them. The command palette (<kbd>Ctrl</kbd> <kbd>Shift</kbd>
+<kbd>p</kbd>) offers the same operations: 向右分屏, 向下分屏, 关闭当前 Pane,
+最大化/还原 Pane and 焦点切换到下一个 Pane.
+
+Note that the default <kbd>Alt</kbd> <kbd>Arrows</kbd> and <kbd>Alt</kbd>
+<kbd>Shift</kbd> <kbd>Arrows</kbd> bindings shadow the escape sequences some
+terminal applications use for word jumps; rebind the `FocusPane*` /
+`ResizePane*` actions if you rely on those.

@@ -498,7 +498,10 @@ impl RectShaderProgram {
         let position = (0.5 * metrics.descent).abs();
         let underline_position = metrics.descent.abs() - metrics.underline_position.abs();
 
-        let viewport_height = size_info.height() - size_info.padding_y();
+        // The fragment shader derives the within-cell phase from `gl_FragCoord - padding`, so the
+        // uniforms must point at the grid's origin (`grid_left`/`grid_top`), not the bare window
+        // padding — the grid may be offset by the chrome or, for split panes, by other panes.
+        let viewport_height = size_info.height() - size_info.grid_top();
         let padding_y = viewport_height
             - (viewport_height / size_info.cell_height()).floor() * size_info.cell_height();
 
@@ -513,7 +516,7 @@ impl RectShaderProgram {
                 gl::Uniform1f(u_padding_y, padding_y);
             }
             if let Some(u_padding_x) = self.u_padding_x {
-                gl::Uniform1f(u_padding_x, size_info.padding_x());
+                gl::Uniform1f(u_padding_x, size_info.grid_left());
             }
             if let Some(u_underline_position) = self.u_underline_position {
                 gl::Uniform1f(u_underline_position, underline_position);

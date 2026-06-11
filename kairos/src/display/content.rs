@@ -43,16 +43,20 @@ impl<'a> RenderableContent<'a> {
         display: &'a mut Display,
         term: &'a Term<T>,
         search_state: &'a mut SearchState,
+        size: &'a SizeInfo,
+        focused: bool,
     ) -> Self {
         let search = search_state.dfas().map(|dfas| HintMatches::visible_regex_matches(term, dfas));
         let focused_match = search_state.focused_match();
         let terminal_content = term.renderable_content();
 
-        // Find terminal cursor shape.
+        // Find terminal cursor shape. Blink-hiding, search and IME preedit only affect the
+        // focused pane; unfocused panes render their (hollow) cursor unconditionally.
         let cursor_shape = if terminal_content.cursor.shape == CursorShape::Hidden
-            || display.cursor_hidden
-            || search_state.regex().is_some()
-            || display.ime.preedit().is_some()
+            || (focused
+                && (display.cursor_hidden
+                    || search_state.regex().is_some()
+                    || display.ime.preedit().is_some()))
         {
             CursorShape::Hidden
         } else if !term.is_focused && config.cursor.unfocused_hollow {
@@ -75,7 +79,7 @@ impl<'a> RenderableContent<'a> {
 
         Self {
             colors: &display.colors,
-            size: &display.size_info,
+            size,
             cursor: RenderableCursor::new_hidden(),
             terminal_content,
             focused_match,

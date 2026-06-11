@@ -28,7 +28,7 @@ use winit::window::CursorIcon;
 use crossfont::{Rasterize, Rasterizer, Size as FontSize};
 use unicode_width::UnicodeWidthChar;
 
-use kairos_terminal::event::{EventListener, OnResize, WindowSize};
+use kairos_terminal::event::{EventListener, WindowSize};
 use kairos_terminal::grid::Dimensions as TermDimensions;
 use kairos_terminal::index::{Column, Direction, Line, Point};
 use kairos_terminal::selection::Selection;
@@ -50,11 +50,11 @@ use crate::display::content::{RenderableContent, RenderableCursor};
 use crate::display::cursor::IntoRects;
 use crate::display::damage::{DamageTracker, damage_y_to_viewport_y};
 use crate::display::hint::{HintMatch, HintState};
-use crate::display::chrome::{Chrome, Hit, PaletteCmd, SettingsState};
+use crate::display::chrome::{Chrome, Hit, PaletteCmd, PixelRect, SettingsState};
 use crate::display::meter::Meter;
 use crate::display::project_pane::{PaneTab, ProjectPaneData};
 use crate::display::window::Window;
-use crate::event::{Event, EventType, Mouse, SearchState};
+use crate::event::{Event, EventType, Mouse, SearchState, SplitDirection};
 use crate::message_bar::{MessageBuffer, MessageType};
 use crate::renderer::rects::{RenderLine, RenderLines, RenderRect};
 use crate::renderer::{self, GlyphCache, Renderer, platform};
@@ -174,9 +174,13 @@ pub struct SizeInfo<T = f32> {
     /// Extra horizontal pixels reserved on the left edge for the egui project sidebar.
     left_extra: T,
 
-    /// Extra horizontal pixels reserved on the right edge for the project pane.
-    #[serde(default)]
+    /// Extra pixels reserved at the right edge of the window beyond this grid's area: the
+    /// project pane, plus — for split panes — the space taken by panes to the right.
     right_extra: T,
+
+    /// Extra pixels reserved at the bottom edge of the window beyond this grid's area: the git
+    /// status bar, plus — for split panes — the space taken by panes below.
+    bottom_extra: T,
 
     /// Number of lines in the viewport.
     screen_lines: usize,
@@ -197,6 +201,7 @@ impl From<SizeInfo<f32>> for SizeInfo<u32> {
             top_extra: size_info.top_extra as u32,
             left_extra: size_info.left_extra as u32,
             right_extra: size_info.right_extra as u32,
+            bottom_extra: size_info.bottom_extra as u32,
             screen_lines: size_info.screen_lines,
             // NOTE: pre-existing upstream quirk — this mirrors `screen_lines`, not `columns`.
             columns: size_info.screen_lines,
@@ -260,6 +265,11 @@ impl<T: Clone + Copy> SizeInfo<T> {
     pub fn right_extra(&self) -> T {
         self.right_extra
     }
+
+    #[inline]
+    pub fn bottom_extra(&self) -> T {
+        self.bottom_extra
+    }
 }
 
 impl SizeInfo<f32> {
@@ -294,8 +304,38 @@ impl SizeInfo<f32> {
             top_extra: 0.,
             left_extra: 0.,
             right_extra: 0.,
+            bottom_extra: 0.,
             screen_lines,
             columns,
+        }
+    }
+
+    /// Geometry for a pane occupying `rect` (window pixels) of a window described by `window`.
+    ///
+    /// The full window dimensions are kept (the renderer's NDC math depends on them); the pane
+    /// rect is expressed through the four `*_extra` reservations, so `grid_left`/`grid_top`
+    /// point at the pane's padded origin and all grid-origin-relative consumers (mouse mapping,
+    /// rect drawing, IME anchoring) work per-pane unchanged.
+    pub fn for_pane(window: &SizeInfo, rect: PixelRect, padding_x: f32, padding_y: f32) -> SizeInfo {
+        let padding_x = padding_x.floor();
+        let padding_y = padding_y.floor();
+
+        let columns = ((rect.w - 2. * padding_x) / window.cell_width) as usize;
+        let screen_lines = ((rect.h - 2. * padding_y) / window.cell_height) as usize;
+
+        SizeInfo {
+            width: window.width,
+            height: window.height,
+            cell_width: window.cell_width,
+            cell_height: window.cell_height,
+            padding_x,
+            padding_y,
+            left_extra: rect.x.floor(),
+            top_extra: rect.y.floor(),
+            right_extra: (window.width - rect.x - rect.w).floor().max(0.),
+            bottom_extra: (window.height - rect.y - rect.h).floor().max(0.),
+            screen_lines: cmp::max(screen_lines, MIN_SCREEN_LINES),
+            columns: cmp::max(columns, MIN_COLUMNS),
         }
     }
 
@@ -469,12 +509,20 @@ pub struct TabBarInfo {
 /// Actions produced by the egui chrome during a frame, drained and dispatched by the window.
 #[derive(Default)]
 pub struct ChromeActions {
-    /// Activate the tab with this terminal id.
+    /// Activate the tab with this tab id.
     pub select: Option<u64>,
-    /// Close the tab with this terminal id.
+    /// Close the tab with this tab id.
     pub close: Option<u64>,
     /// Create a new tab.
     pub create: bool,
+    /// Split the focused pane in this direction (from the command palette).
+    pub split_pane: Option<SplitDirection>,
+    /// Close the focused pane (from the command palette).
+    pub close_pane: bool,
+    /// Maximize or restore the focused pane (from the command palette).
+    pub toggle_pane_zoom: bool,
+    /// Move pane focus to the next pane (from the command palette).
+    pub focus_next_pane: bool,
     /// Copy the active terminal's selection.
     pub copy: bool,
     /// Paste the clipboard into the active terminal.
@@ -875,17 +923,11 @@ impl Display {
     // XXX: this function must not call to any `OpenGL` related tasks. Renderer updates are
     // performed in [`Self::process_renderer_update`] right before drawing.
     //
-    /// Process update events.
-    pub fn handle_update<T>(
-        &mut self,
-        terminal: &mut Term<T>,
-        pty_resize_handle: &mut dyn OnResize,
-        message_buffer: &MessageBuffer,
-        search_state: &mut SearchState,
-        config: &UiConfig,
-    ) where
-        T: EventListener,
-    {
+    /// Process update events, recomputing the window-level [`SizeInfo`].
+    ///
+    /// Terminal and PTY resizing is the caller's responsibility: every pane derives its own
+    /// geometry from [`Self::content_rect`] and is resized by the window's relayout pass.
+    pub fn handle_update(&mut self, message_buffer: &MessageBuffer, config: &UiConfig) {
         let pending_update = mem::take(&mut self.pending_update);
 
         let (mut cell_width, mut cell_height) =
@@ -935,11 +977,10 @@ impl Display {
             config.window.dynamic_padding,
         );
 
-        // Update number of column/lines in the viewport.
-        let search_active = search_state.history_index.is_some();
+        // Reserve rows at the bottom for the message bar. The search bar is a per-pane concern,
+        // reserved inside the searching pane by the relayout pass.
         let message_bar_lines = message_buffer.message().map_or(0, |m| m.text(&new_size).len());
-        let search_lines = usize::from(search_active);
-        new_size.reserve_lines(message_bar_lines + search_lines);
+        new_size.reserve_lines(message_bar_lines);
 
         // Reserve space at the top for the tab bar.
         new_size.reserve_top_px(self.chrome_bar_height);
@@ -958,33 +999,33 @@ impl Display {
             self.window.set_resize_increments(PhysicalSize::new(cell_width, cell_height));
         }
 
-        // Resize when terminal when its dimensions have changed.
-        if self.size_info.screen_lines() != new_size.screen_lines
-            || self.size_info.columns() != new_size.columns()
-        {
-            // Resize PTY.
-            pty_resize_handle.on_resize(new_size.into());
-
-            // Resize terminal.
-            terminal.resize(new_size);
-
-            // Resize damage tracking.
-            self.damage_tracker.resize(new_size.screen_lines(), new_size.columns());
-        }
-
         // Check if dimensions have changed.
         if new_size != self.size_info {
             // Queue renderer update.
             let renderer_update = self.pending_renderer_update.get_or_insert(Default::default());
             renderer_update.resize = true;
 
-            // Clear focused search match.
-            search_state.clear_focused_match();
-
             // The context menu's anchor is tied to the old layout; close it on resize.
             self.chrome.context_menu = None;
         }
         self.size_info = new_size;
+    }
+
+    /// The window-pixel rectangle shared by the active tab's panes: the window minus the chrome
+    /// reservations (tab bar, sidebar, status bar) and the message-bar rows.
+    ///
+    /// The height is expressed as whole grid rows plus padding so a single full-content pane
+    /// reproduces exactly the window-level grid, and the message bar band (drawn in window-level
+    /// grid rows right below [`Self::size_info`]'s `screen_lines`) never underlaps a pane.
+    pub fn content_rect(&self) -> PixelRect {
+        let size_info = &self.size_info;
+        PixelRect {
+            x: size_info.left_extra(),
+            y: size_info.top_extra(),
+            w: size_info.width() - size_info.left_extra(),
+            h: 2. * size_info.padding_y()
+                + size_info.screen_lines() as f32 * size_info.cell_height(),
+        }
     }
 
     // NOTE: Renderer updates are split off, since platforms like Wayland require resize and other
@@ -1018,24 +1059,39 @@ impl Display {
         info!("Width: {}, Height: {}", self.size_info.width(), self.size_info.height());
     }
 
-    /// Draw the screen.
+    /// Start drawing a frame: activate the GL context and clear the window.
     ///
-    /// A reference to Term whose state is being drawn must be provided.
+    /// With more than one visible pane the whole frame is damaged — pane rects move around on
+    /// split/close/drag, making line-based damage from previous frames meaningless.
+    pub fn begin_frame(&mut self, background_color: Rgb, config: &UiConfig, multi_pane: bool) {
+        // Make sure this window's OpenGL context is active.
+        self.make_current();
+
+        if multi_pane {
+            self.damage_tracker.frame().mark_fully_damaged();
+            self.damage_tracker.next_frame().mark_fully_damaged();
+        }
+
+        self.renderer.clear(background_color, config.window_opacity());
+    }
+
+    /// Draw one pane's terminal grid and overlays into its sub-rectangle of the window.
     ///
-    /// This call may block if vsync is enabled.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw<T: EventListener>(
+    /// Must be called between [`Self::begin_frame`] and [`Self::end_frame`], once per visible
+    /// pane, with the focused pane last. `single_pane` selects the partial-damage path that is
+    /// only sound when this pane is the frame's sole content.
+    pub fn draw_pane<T: EventListener>(
         &mut self,
         mut terminal: MutexGuard<'_, Term<T>>,
-        scheduler: &mut Scheduler,
-        message_buffer: &MessageBuffer,
-        config: &UiConfig,
+        size_info: SizeInfo,
         search_state: &mut SearchState,
-        tab_bar: &TabBarInfo,
-        pane_data: Option<&ProjectPaneData>,
+        focused: bool,
+        single_pane: bool,
+        config: &UiConfig,
     ) {
         // Collect renderable content before the terminal is dropped.
-        let mut content = RenderableContent::new(config, self, &terminal, search_state);
+        let mut content =
+            RenderableContent::new(config, self, &terminal, search_state, &size_info, focused);
         let mut grid_cells = Vec::new();
         for cell in &mut content {
             grid_cells.push(cell);
@@ -1049,60 +1105,62 @@ impl Display {
         let cursor_point = terminal.grid().cursor.point;
         let total_lines = terminal.grid().total_lines();
         let metrics = self.glyph_cache.font_metrics();
-        let size_info = self.size_info;
 
         let vi_mode = terminal.mode().contains(TermMode::VI);
         let vi_cursor_point = if vi_mode { Some(terminal.vi_mode_cursor.point) } else { None };
 
-        // Add damage from the terminal.
-        match terminal.damage() {
-            TermDamage::Full => self.damage_tracker.frame().mark_fully_damaged(),
-            TermDamage::Partial(damaged_lines) => {
-                for damage in damaged_lines {
-                    self.damage_tracker.frame().damage_line(damage);
-                }
-            },
+        // Add damage from the terminal. In multi-pane frames everything is already fully
+        // damaged; the terminal's damage is merely consumed.
+        if single_pane {
+            match terminal.damage() {
+                TermDamage::Full => self.damage_tracker.frame().mark_fully_damaged(),
+                TermDamage::Partial(damaged_lines) => {
+                    for damage in damaged_lines {
+                        self.damage_tracker.frame().damage_line(damage);
+                    }
+                },
+            }
         }
         terminal.reset_damage();
 
         // Drop terminal as early as possible to free lock.
         drop(terminal);
 
-        // Invalidate highlighted hints if grid has changed.
-        self.validate_hint_highlights(display_offset);
-
-        // Add damage from kairos's UI elements overlapping terminal.
-
-        let requires_full_damage = self.visual_bell.intensity() != 0.
-            || self.hint_state.active()
-            || search_state.regex().is_some();
-        if requires_full_damage {
-            self.damage_tracker.frame().mark_fully_damaged();
-            self.damage_tracker.next_frame().mark_fully_damaged();
-        }
-
         let vi_cursor_viewport_point =
             vi_cursor_point.and_then(|cursor| term::point_to_viewport(display_offset, cursor));
-        self.damage_tracker.damage_vi_cursor(vi_cursor_viewport_point);
-        self.damage_tracker.damage_selection(selection_range, display_offset);
 
-        // Make sure this window's OpenGL context is active.
-        self.make_current();
+        if focused {
+            // Invalidate highlighted hints if grid has changed.
+            self.validate_hint_highlights(display_offset);
+        }
 
-        self.renderer.clear(background_color, config.window_opacity());
+        if single_pane {
+            // Add damage from kairos's UI elements overlapping terminal.
+            let requires_full_damage = self.visual_bell.intensity() != 0.
+                || self.hint_state.active()
+                || search_state.regex().is_some();
+            if requires_full_damage {
+                self.damage_tracker.frame().mark_fully_damaged();
+                self.damage_tracker.next_frame().mark_fully_damaged();
+            }
+
+            self.damage_tracker.damage_vi_cursor(vi_cursor_viewport_point);
+            self.damage_tracker.damage_selection(selection_range, display_offset);
+        }
+
+        // Point the GL viewport and text projection at this pane's rectangle.
+        self.renderer.resize(&size_info);
+
         let mut lines = RenderLines::new();
 
-        // Optimize loop hint comparator.
-        let has_highlighted_hint =
-            self.highlighted_hint.is_some() || self.vi_highlighted_hint.is_some();
+        // Optimize loop hint comparator. Hint underlines follow the focused pane (mouse-hover
+        // hints across panes are resolved before the highlight is set).
+        let has_highlighted_hint = focused
+            && (self.highlighted_hint.is_some() || self.vi_highlighted_hint.is_some());
 
         // Draw grid.
         {
             let _sampler = self.meter.sampler();
-
-            // Ensure macOS hasn't reset our viewport.
-            #[cfg(target_os = "macos")]
-            self.renderer.set_viewport(&size_info);
 
             let glyph_cache = &mut self.glyph_cache;
             let highlighted_hint = &self.highlighted_hint;
@@ -1134,49 +1192,38 @@ impl Display {
 
         let mut rects = lines.rects(&metrics, &size_info);
 
-        if let Some(vi_cursor_point) = vi_cursor_point {
-            // Indicate vi mode by showing the cursor's position in the top right corner.
-            let line = (-vi_cursor_point.line.0 + size_info.bottommost_line().0) as usize;
-            let obstructed_column = Some(vi_cursor_point)
-                .filter(|point| point.line == -(display_offset as i32))
-                .map(|point| point.column);
-            self.draw_line_indicator(config, total_lines, obstructed_column, line);
-        } else if search_state.regex().is_some() {
-            // Show current display offset in vi-less search to indicate match position.
-            self.draw_line_indicator(config, total_lines, None, display_offset);
-        };
+        if focused {
+            if let Some(vi_cursor_point) = vi_cursor_point {
+                // Indicate vi mode by showing the cursor's position in the top right corner.
+                let line = (-vi_cursor_point.line.0 + size_info.bottommost_line().0) as usize;
+                let obstructed_column = Some(vi_cursor_point)
+                    .filter(|point| point.line == -(display_offset as i32))
+                    .map(|point| point.column);
+                self.draw_line_indicator(config, &size_info, total_lines, obstructed_column, line);
+            } else if search_state.regex().is_some() {
+                // Show current display offset in vi-less search to indicate match position.
+                self.draw_line_indicator(config, &size_info, total_lines, None, display_offset);
+            }
+        }
 
         // Draw cursor.
         rects.extend(cursor.rects(&size_info, config.cursor.thickness()));
 
-        // Push visual bell after url/underline/strikeout rects.
-        let visual_bell_intensity = self.visual_bell.intensity();
-        if visual_bell_intensity != 0. {
-            let visual_bell_rect = RenderRect::new(
-                0.,
-                0.,
-                size_info.width(),
-                size_info.height(),
-                config.bell.color,
-                visual_bell_intensity as f32,
-            );
-            rects.push(visual_bell_rect);
-        }
+        // Search bar and IME positioning. The bar renders in any searching pane (its bottom row
+        // was reserved by the relayout pass); the input caret and IME belong to the focused pane.
+        let mut ime_position = None;
+        if let Some(regex) = search_state.regex() {
+            let search_label = match search_state.direction() {
+                Direction::Right => FORWARD_SEARCH_LABEL,
+                Direction::Left => BACKWARD_SEARCH_LABEL,
+            };
 
-        // Handle IME positioning and search bar rendering.
-        let ime_position = match search_state.regex() {
-            Some(regex) => {
-                let search_label = match search_state.direction() {
-                    Direction::Right => FORWARD_SEARCH_LABEL,
-                    Direction::Left => BACKWARD_SEARCH_LABEL,
-                };
+            let search_text = Self::format_search(regex, search_label, size_info.columns());
 
-                let search_text = Self::format_search(regex, search_label, size_info.columns());
+            // Render the search bar.
+            self.draw_search(config, &size_info, &search_text);
 
-                // Render the search bar.
-                self.draw_search(config, &search_text);
-
-                // Draw search bar cursor.
+            if focused {
                 let line = size_info.screen_lines();
                 let column = Column(search_text.chars().count() - 1);
 
@@ -1190,20 +1237,19 @@ impl Display {
                     rects.extend(cursor.rects(&size_info, config.cursor.thickness()));
                 }
 
-                Some(Point::new(line, column))
-            },
-            None => {
-                let num_lines = self.size_info.screen_lines();
-                match vi_cursor_viewport_point {
-                    None => term::point_to_viewport(display_offset, cursor_point)
-                        .filter(|point| point.line < num_lines),
-                    point => point,
-                }
-            },
-        };
+                ime_position = Some(Point::new(line, column));
+            }
+        } else if focused {
+            let num_lines = size_info.screen_lines();
+            ime_position = match vi_cursor_viewport_point {
+                None => term::point_to_viewport(display_offset, cursor_point)
+                    .filter(|point| point.line < num_lines),
+                point => point,
+            };
+        }
 
         // Handle IME.
-        if self.ime.is_enabled() {
+        if focused && self.ime.is_enabled() {
             if let Some(point) = ime_position {
                 let (fg, bg) = if search_state.regex().is_some() {
                     (config.colors.footer_bar_foreground(), config.colors.footer_bar_background())
@@ -1211,16 +1257,74 @@ impl Display {
                     (foreground_color, background_color)
                 };
 
-                self.draw_ime_preview(point, fg, bg, &mut rects, config);
+                self.draw_ime_preview(point, fg, bg, &mut rects, config, &size_info);
             }
         }
 
+        // Draw rectangles.
+        self.renderer.draw_rects(&size_info, &metrics, rects);
+
+        // Draw hyperlink uri preview.
+        if has_highlighted_hint {
+            let cursor_point = vi_cursor_point.or(Some(cursor_point));
+            self.draw_hyperlink_preview(config, &size_info, cursor_point, display_offset);
+        }
+    }
+
+    /// Finish a frame: window-level overlays (pane dividers, visual bell, message bar, chrome)
+    /// and buffer swap.
+    #[allow(clippy::too_many_arguments)]
+    pub fn end_frame(
+        &mut self,
+        scheduler: &mut Scheduler,
+        message_buffer: &MessageBuffer,
+        config: &UiConfig,
+        tab_bar: &TabBarInfo,
+        pane_data: Option<&ProjectPaneData>,
+        dividers: &[PixelRect],
+    ) {
+        let metrics = self.glyph_cache.font_metrics();
+        let size_info = self.size_info;
+
+        // Restore the window-level viewport and projection after the per-pane passes.
+        self.renderer.resize(&size_info);
+
+        // Pane dividers and the visual bell live in absolute window pixels.
+        let mut window_rects = Vec::new();
+        let divider_color = self.chrome.divider_color();
+        for divider in dividers {
+            window_rects.push(RenderRect::new(
+                divider.x,
+                divider.y,
+                divider.w,
+                divider.h,
+                divider_color,
+                1.,
+            ));
+        }
+
+        let visual_bell_intensity = self.visual_bell.intensity();
+        if visual_bell_intensity != 0. {
+            window_rects.push(RenderRect::new(
+                0.,
+                0.,
+                size_info.width(),
+                size_info.height(),
+                config.bell.color,
+                visual_bell_intensity as f32,
+            ));
+        }
+
+        if !window_rects.is_empty() {
+            self.renderer.draw_chrome_rects(&size_info, &metrics, window_rects);
+        }
+
+        // The message bar spans the window-level grid rows right below `screen_lines`.
         if let Some(message) = message_buffer.message() {
-            let search_offset = usize::from(search_state.regex().is_some());
             let text = message.text(&size_info);
 
             // Create a new rectangle for the background.
-            let start_line = size_info.screen_lines() + search_offset;
+            let start_line = size_info.screen_lines();
             let y = size_info.cell_height().mul_add(start_line as f32, size_info.padding_y());
 
             let bg = match message.ty() {
@@ -1234,14 +1338,11 @@ impl Display {
             let message_bar_rect =
                 RenderRect::new(x as f32, y, width as f32, height as f32, bg, 1.);
 
-            // Push message_bar in the end, so it'll be above all other content.
-            rects.push(message_bar_rect);
-
             // Always damage message bar, since it could have messages of the same size in it.
             self.damage_tracker.frame().add_viewport_rect(&size_info, x, y as i32, width, height);
 
             // Draw rectangles.
-            self.renderer.draw_rects(&size_info, &metrics, rects);
+            self.renderer.draw_rects(&size_info, &metrics, vec![message_bar_rect]);
 
             // Relay messages to the user.
             let glyph_cache = &mut self.glyph_cache;
@@ -1257,18 +1358,9 @@ impl Display {
                     glyph_cache,
                 );
             }
-        } else {
-            // Draw rectangles.
-            self.renderer.draw_rects(&size_info, &metrics, rects);
         }
 
         self.draw_render_timer(config);
-
-        // Draw hyperlink uri preview.
-        if has_highlighted_hint {
-            let cursor_point = vi_cursor_point.or(Some(cursor_point));
-            self.draw_hyperlink_preview(config, cursor_point, display_offset);
-        }
 
         // Notify winit that we're about to present.
         self.window.pre_present_notify();
@@ -1313,6 +1405,9 @@ impl Display {
 
     /// Update the mouse/vi mode cursor hint highlighting.
     ///
+    /// `size_info` must describe the geometry of `term`'s pane — the mouse position is mapped
+    /// through it into that grid.
+    ///
     /// This will return whether the highlighted hints changed.
     pub fn update_highlighted_hints<T>(
         &mut self,
@@ -1320,6 +1415,7 @@ impl Display {
         config: &UiConfig,
         mouse: &Mouse,
         modifiers: ModifiersState,
+        size_info: &SizeInfo,
     ) -> bool {
         // Update vi mode cursor hint.
         let vi_highlighted_hint = if term.mode().contains(TermMode::VI) {
@@ -1351,7 +1447,7 @@ impl Display {
         }
 
         // Find highlighted hint at mouse position.
-        let point = mouse.point(&self.size_info, term.grid().display_offset());
+        let point = mouse.point(size_info, term.grid().display_offset());
         let highlighted_hint = hint::highlighted_at(term, config, point, modifiers);
 
         // Update cursor shape.
@@ -1391,17 +1487,18 @@ impl Display {
         bg: Rgb,
         rects: &mut Vec<RenderRect>,
         config: &UiConfig,
+        size_info: &SizeInfo,
     ) {
         let preedit = match self.ime.preedit() {
             Some(preedit) => preedit,
             None => {
                 // In case we don't have preedit, just set the popup point.
-                self.window.update_ime_position(point, &self.size_info);
+                self.window.update_ime_position(point, size_info);
                 return;
             },
         };
 
-        let num_cols = self.size_info.columns();
+        let num_cols = size_info.columns();
 
         // Get the visible preedit.
         let visible_text: String = match (preedit.cursor_byte_offset, preedit.cursor_end_offset) {
@@ -1428,17 +1525,10 @@ impl Display {
         let glyph_cache = &mut self.glyph_cache;
         let metrics = glyph_cache.font_metrics();
 
-        self.renderer.draw_string(
-            start,
-            fg,
-            bg,
-            visible_text.chars(),
-            &self.size_info,
-            glyph_cache,
-        );
+        self.renderer.draw_string(start, fg, bg, visible_text.chars(), size_info, glyph_cache);
 
         // Damage preedit inside the terminal viewport.
-        if point.line < self.size_info.screen_lines() {
+        if point.line < size_info.screen_lines() {
             let damage = LineDamageBounds::new(start.line, 0, num_cols);
             self.damage_tracker.frame().damage_line(damage);
             self.damage_tracker.next_frame().damage_line(damage);
@@ -1446,7 +1536,7 @@ impl Display {
 
         // Add underline for preedit text.
         let underline = RenderLine { start, end, color: fg };
-        rects.extend(underline.rects(Flags::UNDERLINE, &metrics, &self.size_info));
+        rects.extend(underline.rects(Flags::UNDERLINE, &metrics, size_info));
 
         let ime_popup_point = match preedit.cursor_end_offset {
             Some(cursor_end_offset) => {
@@ -1464,13 +1554,13 @@ impl Display {
                 );
                 let cursor_point = Point::new(point.line, cursor_column);
                 let cursor = RenderableCursor::new(cursor_point, shape, fg, width);
-                rects.extend(cursor.rects(&self.size_info, config.cursor.thickness()));
+                rects.extend(cursor.rects(size_info, config.cursor.thickness()));
                 cursor_point
             },
             _ => end,
         };
 
-        self.window.update_ime_position(ime_popup_point, &self.size_info);
+        self.window.update_ime_position(ime_popup_point, size_info);
     }
 
     /// Format search regex to account for the cursor and fullwidth characters.
@@ -1502,10 +1592,11 @@ impl Display {
     fn draw_hyperlink_preview(
         &mut self,
         config: &UiConfig,
+        size_info: &SizeInfo,
         cursor_point: Option<Point>,
         display_offset: usize,
     ) {
-        let num_cols = self.size_info.columns();
+        let num_cols = size_info.columns();
         let uris: Vec<_> = self
             .highlighted_hint
             .iter()
@@ -1523,7 +1614,7 @@ impl Display {
 
         // Lines we shouldn't show preview on, because it'll obscure the highlighted hint.
         let mut protected_lines = Vec::with_capacity(max_protected_lines);
-        if self.size_info.screen_lines() > max_protected_lines {
+        if size_info.screen_lines() > max_protected_lines {
             // Prefer to show preview even when it'll likely obscure the highlighted hint, when
             // there's no place left for it.
             protected_lines.push(self.hint_mouse_point.map(|point| point.line));
@@ -1531,8 +1622,8 @@ impl Display {
         }
 
         // Find the line in viewport we can draw preview on without obscuring protected lines.
-        let viewport_bottom = self.size_info.bottommost_line() - Line(display_offset as i32);
-        let viewport_top = viewport_bottom - (self.size_info.screen_lines() - 1);
+        let viewport_bottom = size_info.bottommost_line() - Line(display_offset as i32);
+        let viewport_top = viewport_bottom - (size_info.screen_lines() - 1);
         let uri_lines = (viewport_top.0..=viewport_bottom.0)
             .rev()
             .map(|line| Some(Line(line)))
@@ -1557,30 +1648,23 @@ impl Display {
             // Damage the uri preview for the next frame as well.
             self.damage_tracker.next_frame().damage_line(damage);
 
-            self.renderer.draw_string(point, fg, bg, uri, &self.size_info, &mut self.glyph_cache);
+            self.renderer.draw_string(point, fg, bg, uri, size_info, &mut self.glyph_cache);
         }
     }
 
     /// Draw current search regex.
     #[inline(never)]
-    fn draw_search(&mut self, config: &UiConfig, text: &str) {
+    fn draw_search(&mut self, config: &UiConfig, size_info: &SizeInfo, text: &str) {
         // Assure text length is at least num_cols.
-        let num_cols = self.size_info.columns();
+        let num_cols = size_info.columns();
         let text = format!("{text:<num_cols$}");
 
-        let point = Point::new(self.size_info.screen_lines(), Column(0));
+        let point = Point::new(size_info.screen_lines(), Column(0));
 
         let fg = config.colors.footer_bar_foreground();
         let bg = config.colors.footer_bar_background();
 
-        self.renderer.draw_string(
-            point,
-            fg,
-            bg,
-            text.chars(),
-            &self.size_info,
-            &mut self.glyph_cache,
-        );
+        self.renderer.draw_string(point, fg, bg, text.chars(), size_info, &mut self.glyph_cache);
     }
 
     /// Offer a winit window event to the native chrome. Returns whether the chrome consumed it
@@ -1868,6 +1952,13 @@ impl Display {
             PaletteCmd::NewProject => self.chrome_actions.create_project = true,
             PaletteCmd::ToggleSidebar => self.chrome_actions.toggle_sidebar = true,
             PaletteCmd::ToggleProjectPane => self.chrome_actions.toggle_pane = true,
+            PaletteCmd::SplitRight => {
+                self.chrome_actions.split_pane = Some(SplitDirection::Right)
+            },
+            PaletteCmd::SplitDown => self.chrome_actions.split_pane = Some(SplitDirection::Down),
+            PaletteCmd::ClosePane => self.chrome_actions.close_pane = true,
+            PaletteCmd::TogglePaneZoom => self.chrome_actions.toggle_pane_zoom = true,
+            PaletteCmd::FocusNextPane => self.chrome_actions.focus_next_pane = true,
         }
     }
 
@@ -2096,13 +2187,14 @@ impl Display {
     fn draw_line_indicator(
         &mut self,
         config: &UiConfig,
+        size_info: &SizeInfo,
         total_lines: usize,
         obstructed_column: Option<Column>,
         line: usize,
     ) {
-        let columns = self.size_info.columns();
+        let columns = size_info.columns();
         let text = format!("[{}/{}]", line, total_lines - 1);
-        let column = Column(self.size_info.columns().saturating_sub(text.len()));
+        let column = Column(size_info.columns().saturating_sub(text.len()));
         let point = Point::new(0, column);
 
         // Damage the line indicator for current and next frame.
@@ -2117,7 +2209,7 @@ impl Display {
         // Do not render anything if it would obscure the vi mode cursor.
         if obstructed_column.is_none_or(|obstructed_column| obstructed_column < column) {
             let glyph_cache = &mut self.glyph_cache;
-            self.renderer.draw_string(point, fg, bg, text.chars(), &self.size_info, glyph_cache);
+            self.renderer.draw_string(point, fg, bg, text.chars(), size_info, glyph_cache);
         }
     }
 

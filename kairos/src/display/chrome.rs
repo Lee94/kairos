@@ -40,14 +40,16 @@ const MIN_PANE_COLS: f32 = 16.;
 const MAX_PANE_COLS: f32 = 100.;
 /// Half-width (window pixels) of the grab zone straddling the sidebar's right divider.
 const DIVIDER_GRAB_PX: f32 = 4.;
-/// Maximum display width (in chrome cells) of a tab label before it is truncated.
-const MAX_TAB_LABEL: usize = 20;
+/// Clamp range (in chrome cells) of a tab segment's width: tabs auto-size to their label between
+/// these bounds (the segment holds the label plus padding and the close glyph).
+const MIN_TAB_COLS: f32 = 8.;
+const MAX_TAB_COLS: f32 = 24.;
 /// Width (in chrome cells) of the right-click context menu.
 const MENU_COLS: usize = 14;
 
 // Spacing, expressed as multiples of the chrome cell so it scales with the font.
 /// Tab bar height = chrome cell height × this.
-const BAR_H_MULT: f32 = 1.6;
+const BAR_H_MULT: f32 = 2.0;
 /// Sidebar / menu row height = chrome cell height × this.
 const ROW_H_MULT: f32 = 1.45;
 /// Git status bar height = chrome cell height × this.
@@ -114,6 +116,11 @@ pub enum PaletteCmd {
     NewProject,
     ToggleSidebar,
     ToggleProjectPane,
+    SplitRight,
+    SplitDown,
+    ClosePane,
+    TogglePaneZoom,
+    FocusNextPane,
 }
 
 /// The command palette's entries: `(label, search keywords, command)`. The keywords (lowercase,
@@ -127,6 +134,19 @@ pub const PALETTE_COMMANDS: &[(&str, &str, PaletteCmd)] = &[
         "切换项目面板",
         "toggle project pane panel files changes qiehuan xiangmu mianban",
         PaletteCmd::ToggleProjectPane,
+    ),
+    ("向右分屏", "split right pane fenping xiangyou", PaletteCmd::SplitRight),
+    ("向下分屏", "split down pane fenping xiangxia", PaletteCmd::SplitDown),
+    ("关闭当前 Pane", "close pane guanbi dangqian", PaletteCmd::ClosePane),
+    (
+        "最大化/还原 Pane",
+        "zoom maximize restore pane zuidahua huanyuan",
+        PaletteCmd::TogglePaneZoom,
+    ),
+    (
+        "焦点切换到下一个 Pane",
+        "focus next pane jiaodian qiehuan xiayige",
+        PaletteCmd::FocusNextPane,
     ),
 ];
 
@@ -312,17 +332,17 @@ fn find_windows_shell(suffixes: &[&str]) -> Option<String> {
     None
 }
 
-/// A clickable region of the chrome, in window pixels.
-#[derive(Clone, Copy)]
-pub(crate) struct PixelRect {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
-    pub(crate) w: f32,
-    pub(crate) h: f32,
+/// A rectangle in window pixels, used for chrome hit regions and pane geometry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PixelRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 impl PixelRect {
-    fn contains(&self, px: f32, py: f32) -> bool {
+    pub fn contains(&self, px: f32, py: f32) -> bool {
         px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
     }
 }
@@ -636,6 +656,11 @@ impl Chrome {
         if cols > 0. {
             self.pane_cols = cols.clamp(MIN_PANE_COLS, MAX_PANE_COLS);
         }
+    }
+
+    /// Color of the dividers drawn between split panes, from the chrome's border palette.
+    pub fn divider_color(&self) -> Rgb {
+        border()
     }
 
     /// Open the command palette, or close it if already open. Closes other overlays.
@@ -1122,13 +1147,17 @@ impl Chrome {
         let hl_margin = ((bar_h - ch) * 0.3).max(2.);
         let hl_h = bar_h - 2. * hl_margin;
 
+        // Tabs auto-size to their label between MIN/MAX_TAB_COLS: the label is truncated to what
+        // fits the widest allowed segment, and short labels are padded up to the narrowest one.
+        let label_budget = ((MAX_TAB_COLS * cw - pad_x - cw) / cw).floor().max(1.) as usize;
+
         let mut x = bar_x + pad_x;
         for (i, title) in info.titles.iter().enumerate() {
             let id = info.ids[i];
             let name = if title.is_empty() { "shell" } else { title.as_str() };
-            let label = truncate(&format!("{}:{}", i + 1, name), MAX_TAB_LABEL);
+            let label = truncate(&format!("{}:{}", i + 1, name), label_budget);
             let label_w = str_width(&label) as f32 * cw;
-            let seg_w = label_w + pad_x + cw; // label + gap + close glyph
+            let seg_w = (label_w + pad_x + cw).max(MIN_TAB_COLS * cw); // label + gap + close glyph
 
             // Stop drawing once segments overflow the window (no horizontal scroll).
             if x + seg_w + pad_x > win_w {
@@ -1137,19 +1166,22 @@ impl Chrome {
 
             // A focused viewer tab steals the highlight from the active terminal tab.
             let selected = i == info.active && self.pane.viewer_focus.is_none();
+            let hovered =
+                matches!(self.hover, Some(Hit::SelectTab(h) | Hit::CloseTab(h)) if h == id);
             if selected {
                 draw.rects.push(rect(x - pad_x * 0.5, hl_margin, seg_w + pad_x, hl_h, accent()));
-            } else if self.hover == Some(Hit::SelectTab(id)) {
+            } else if hovered {
                 draw.rects.push(rect(x - pad_x * 0.5, hl_margin, seg_w + pad_x, hl_h, hover_bg()));
             }
 
-            // Label.
-            let label_region = PixelRect { x, y: 0., w: label_w + pad_x * 0.5, h: bar_h };
+            // Label; its hit region spans the whole segment (the close button's region is pushed
+            // later, so it wins hit-testing over the overlap).
+            let label_region = PixelRect { x: x - pad_x * 0.5, y: 0., w: seg_w + pad_x, h: bar_h };
             push_text_px(&mut draw.cells, x, base, &label, if selected { fg() } else { dim() }, cw);
             self.hits.push((label_region, Hit::SelectTab(id)));
 
-            // Close button.
-            let close_x = x + label_w + pad_x;
+            // Close button, anchored to the segment's right edge.
+            let close_x = x + seg_w - cw;
             let close_region =
                 PixelRect { x: close_x - pad_x * 0.5, y: 0., w: cw + pad_x * 0.5, h: bar_h };
             if self.hover == Some(Hit::CloseTab(id)) {
@@ -1174,25 +1206,29 @@ impl Chrome {
         })
         .collect();
         for (kind, label) in viewer_tabs {
-            let label = truncate(&label, MAX_TAB_LABEL);
+            let label = truncate(&label, label_budget);
             let label_w = str_width(&label) as f32 * cw;
-            let seg_w = label_w + pad_x + cw;
+            let seg_w = (label_w + pad_x + cw).max(MIN_TAB_COLS * cw);
             if x + seg_w + pad_x > win_w {
                 break;
             }
 
             let selected = self.pane.viewer_focus == Some(kind);
+            let hovered = matches!(
+                self.hover,
+                Some(Hit::ViewerTab(h) | Hit::ViewerTabClose(h)) if h == kind
+            );
             if selected {
                 draw.rects.push(rect(x - pad_x * 0.5, hl_margin, seg_w + pad_x, hl_h, accent()));
-            } else if self.hover == Some(Hit::ViewerTab(kind)) {
+            } else if hovered {
                 draw.rects.push(rect(x - pad_x * 0.5, hl_margin, seg_w + pad_x, hl_h, hover_bg()));
             }
 
-            let label_region = PixelRect { x, y: 0., w: label_w + pad_x * 0.5, h: bar_h };
+            let label_region = PixelRect { x: x - pad_x * 0.5, y: 0., w: seg_w + pad_x, h: bar_h };
             push_text_px(&mut draw.cells, x, base, &label, if selected { fg() } else { dim() }, cw);
             self.hits.push((label_region, Hit::ViewerTab(kind)));
 
-            let close_x = x + label_w + pad_x;
+            let close_x = x + seg_w - cw;
             let close_region =
                 PixelRect { x: close_x - pad_x * 0.5, y: 0., w: cw + pad_x * 0.5, h: bar_h };
             if self.hover == Some(Hit::ViewerTabClose(kind)) {

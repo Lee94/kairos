@@ -457,9 +457,11 @@ impl Window {
         // NOTE: X11 doesn't support cursor area, so we need to offset manually to not obscure
         // the text.
         let offset = if self.is_x11 { 1 } else { 0 };
-        let nspot_x = f64::from(size.padding_x() + point.column.0 as f32 * size.cell_width());
+        // Anchor relative to the grid's origin (chrome offsets and, for split panes, the pane's
+        // position included), not the bare window padding.
+        let nspot_x = f64::from(size.grid_left() + point.column.0 as f32 * size.cell_width());
         let nspot_y =
-            f64::from(size.padding_y() + (point.line + offset) as f32 * size.cell_height());
+            f64::from(size.grid_top() + (point.line + offset) as f32 * size.cell_height());
 
         // NOTE: some compositors don't like excluding too much and try to render popup at the
         // bottom right corner of the provided area, so exclude just the full-width char to not

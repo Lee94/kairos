@@ -43,7 +43,8 @@ use crate::display::hint::HintMatch;
 use crate::display::window::{ImeInhibitor, Window};
 use crate::display::{Display, SizeInfo};
 use crate::event::{
-    ClickState, Event, EventType, InlineSearchState, Mouse, TabSelection, TouchPurpose, TouchZoom,
+    ClickState, Event, EventType, InlineSearchState, Mouse, PaneDirection, SplitDirection,
+    TabSelection, TouchPurpose, TouchZoom,
 };
 use crate::message_bar::{self, Message};
 use crate::scheduler::{Scheduler, TimerId, Topic};
@@ -81,6 +82,11 @@ pub trait ActionContext<T: EventListener> {
     fn write_to_pty<B: Into<Cow<'static, [u8]>>>(&self, _data: B) {}
     fn mark_dirty(&mut self) {}
     fn size_info(&self) -> SizeInfo;
+    /// Geometry of the whole window's grid space, for window-level overlays (message bar).
+    /// Defaults to the pane geometry; only meaningfully different with split panes.
+    fn window_size_info(&self) -> SizeInfo {
+        self.size_info()
+    }
     fn copy_selection(&mut self, _ty: ClipboardType) {}
     fn start_selection(&mut self, _ty: SelectionType, _point: Point, _side: Side) {}
     fn toggle_selection(&mut self, _ty: SelectionType, _point: Point, _side: Side) {}
@@ -104,6 +110,11 @@ pub trait ActionContext<T: EventListener> {
     fn create_tab(&mut self) {}
     fn select_tab(&mut self, _selection: TabSelection) {}
     fn close_active_tab(&mut self) {}
+    fn split_pane(&mut self, _direction: SplitDirection) {}
+    fn close_pane(&mut self) {}
+    fn focus_pane(&mut self, _direction: PaneDirection) {}
+    fn resize_pane(&mut self, _direction: PaneDirection) {}
+    fn toggle_pane_zoom(&mut self) {}
     fn close_window(&mut self) {}
     /// Toggle the project sidebar's visibility.
     fn toggle_project_sidebar(&mut self) {}
@@ -417,6 +428,18 @@ impl<T: EventListener> Execute<T> for Action {
             Action::CreateNewWindow => ctx.create_new_window(None),
             Action::CreateNewTab => ctx.create_tab(),
             Action::CloseTab => ctx.close_active_tab(),
+            Action::SplitRight => ctx.split_pane(SplitDirection::Right),
+            Action::SplitDown => ctx.split_pane(SplitDirection::Down),
+            Action::ClosePane => ctx.close_pane(),
+            Action::FocusPaneLeft => ctx.focus_pane(PaneDirection::Left),
+            Action::FocusPaneRight => ctx.focus_pane(PaneDirection::Right),
+            Action::FocusPaneUp => ctx.focus_pane(PaneDirection::Up),
+            Action::FocusPaneDown => ctx.focus_pane(PaneDirection::Down),
+            Action::ResizePaneLeft => ctx.resize_pane(PaneDirection::Left),
+            Action::ResizePaneRight => ctx.resize_pane(PaneDirection::Right),
+            Action::ResizePaneUp => ctx.resize_pane(PaneDirection::Up),
+            Action::ResizePaneDown => ctx.resize_pane(PaneDirection::Down),
+            Action::TogglePaneZoom => ctx.toggle_pane_zoom(),
             Action::ToggleProjectSidebar => ctx.toggle_project_sidebar(),
             Action::ToggleCommandPalette => {
                 ctx.display().toggle_command_palette();
@@ -1077,17 +1100,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Check mouse icon state in relation to the message bar.
     fn message_bar_cursor_state(&self) -> Option<CursorIcon> {
-        // Since search is above the message bar, the button is offset by search's height.
-        let search_height = usize::from(self.ctx.search_active());
-
-        // Calculate Y position of the end of the last terminal line.
-        let size = self.ctx.size_info();
-        let terminal_end = size.padding_y() as usize
-            + size.cell_height() as usize * (size.screen_lines() + search_height);
+        // The message bar is a window-level band right below the window-level grid rows (the
+        // search bar lives inside its pane and no longer offsets it).
+        let size = self.ctx.window_size_info();
+        let terminal_end =
+            size.padding_y() as usize + size.cell_height() as usize * size.screen_lines();
 
         let mouse = self.ctx.mouse();
         let display_offset = self.ctx.terminal().grid().display_offset();
-        let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+        let point = self.ctx.mouse().point(&size, display_offset);
 
         if self.ctx.message().is_none() || (mouse.y <= terminal_end) {
             None
@@ -1131,9 +1152,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let min_height = (MIN_SELECTION_SCROLLING_HEIGHT * scale_factor) as i32;
         let step = (SELECTION_SCROLLING_STEP * scale_factor) as i32;
 
-        // Compute the height of the scrolling areas.
-        let end_top = max(min_height, size.padding_y() as i32);
-        let text_area_bottom = size.padding_y() + size.screen_lines() as f32 * size.cell_height();
+        // Compute the height of the scrolling areas, hugging the grid (which may be offset by
+        // the chrome or, for split panes, by other panes).
+        let end_top = max(min_height, size.grid_top() as i32);
+        let text_area_bottom = size.grid_top() + size.screen_lines() as f32 * size.cell_height();
         let start_bottom = min(size.height() as i32 - min_height, text_area_bottom as i32);
 
         // Get distance from closest window boundary.
