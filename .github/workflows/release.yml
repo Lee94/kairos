@@ -3,6 +3,10 @@ name: Release
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  # Lets the Windows build be re-triggered by hand (Actions tab → Release → Run
+  # workflow, or `gh workflow run release.yml`). Forks must enable Actions once in
+  # the web UI before any trigger — push or dispatch — actually starts a run.
+  workflow_dispatch:
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -18,23 +22,29 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        # Full history + tags so `git describe` resolves the version on a manual run,
+        # not just on a tag push.
+        with:
+          fetch-depth: 0
+      - name: Determine version
+        run: echo "VERSION=$(git describe --tags --abbrev=0)" >> "$GITHUB_ENV"
       - name: Test
         run: cargo test --release
       - name: Build
         run: cargo build --release
       - name: Upload portable executable
         run: |
-          cp ./target/release/kairos.exe ./Kairos-${GITHUB_REF##*/}-portable.exe
+          cp ./target/release/kairos.exe ./Kairos-${VERSION}-portable.exe
           ./.github/workflows/upload_asset.sh \
-            ./Kairos-${GITHUB_REF##*/}-portable.exe $GITHUB_TOKEN
+            ./Kairos-${VERSION}-portable.exe $GITHUB_TOKEN
       - name: Install WiX
         run: dotnet tool install --global wix --version 4.0.5
       - name: Create msi installer
         run: |
           wix extension add WixToolset.UI.wixext/4.0.5 WixToolset.Util.wixext/4.0.5
           wix build -arch "x64" -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
-          -out "./Kairos-${GITHUB_REF##*/}-installer.msi" "kairos/windows/wix/kairos.wxs"
+          -out "./Kairos-${VERSION}-installer.msi" "kairos/windows/wix/kairos.wxs"
       - name: Upload msi installer
         run: |
           ./.github/workflows/upload_asset.sh \
-            ./Kairos-${GITHUB_REF##*/}-installer.msi $GITHUB_TOKEN
+            ./Kairos-${VERSION}-installer.msi $GITHUB_TOKEN
