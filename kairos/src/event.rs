@@ -1145,9 +1145,13 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
 
     // Copy text selection.
     fn copy_selection(&mut self, ty: ClipboardType) {
-        let text = match self.terminal.selection_to_string().filter(|s| !s.is_empty()) {
+        // A focused viewer tab (file preview / diff) owns the selection; prefer its text.
+        let text = match self.display.viewer_selection_text().filter(|s| !s.is_empty()) {
             Some(text) => text,
-            None => return,
+            None => match self.terminal.selection_to_string().filter(|s| !s.is_empty()) {
+                Some(text) => text,
+                None => return,
+            },
         };
 
         if ty == ClipboardType::Selection && self.config.selection.save_to_clipboard {

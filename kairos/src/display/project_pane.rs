@@ -13,6 +13,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::display::color::Rgb;
 use crate::git_worker::{ChangedFile, DiffLine, DiffLineKind, GitFileStatus};
 use crate::highlight::{self, SpanLine};
@@ -45,16 +47,28 @@ fn hunk_fg() -> Rgb {
     Rgb::new(0x7a, 0xa2, 0xf7)
 }
 fn add_bg() -> Rgb {
-    Rgb::new(0x12, 0x26, 0x16)
+    Rgb::new(0x1b, 0x42, 0x29)
 }
 fn del_bg() -> Rgb {
-    Rgb::new(0x2a, 0x15, 0x18)
+    Rgb::new(0x4c, 0x20, 0x26)
+}
+/// Muted fill for the empty side of a changed split row (no counterpart line), so the gap reads as
+/// part of the comparison rather than blank surface.
+fn absent_bg() -> Rgb {
+    Rgb::new(0x14, 0x14, 0x17)
 }
 
 /// Pending / in-progress amber.
 fn pending_fg() -> Rgb {
     Rgb::new(0xe5, 0xc0, 0x7b)
 }
+
+/// Text-selection highlight in the center viewer: the chrome's macOS-style blue, drawn
+/// translucent so the glyphs on top stay readable.
+fn sel_bg() -> Rgb {
+    Rgb::new(0x2f, 0x6f, 0xed)
+}
+const SEL_ALPHA: f32 = 0.35;
 
 /// Color for a changed file's status letter.
 fn status_color(status: GitFileStatus) -> Rgb {
@@ -87,6 +101,59 @@ pub enum ViewerContent {
 pub enum ViewerKind {
     Preview,
     Diff,
+}
+
+/// A position within the center viewer's flattened content: a row index into the laid-out rows
+/// and a display column (cell), with column 0 at the first text cell of every row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ViewerPos {
+    row: usize,
+    col: usize,
+}
+
+/// A text selection in the center viewer. Anchored where the drag began; `focus` tracks the
+/// pointer. It is empty (no highlight, nothing to copy) until the drag reaches another cell.
+#[derive(Clone, Copy)]
+struct ViewerSelection {
+    anchor: ViewerPos,
+    focus: ViewerPos,
+}
+
+impl ViewerSelection {
+    /// `(start, end)` ordered so `start` precedes `end` in reading order.
+    fn ordered(&self) -> (ViewerPos, ViewerPos) {
+        let (a, f) = (self.anchor, self.focus);
+        if (a.row, a.col) <= (f.row, f.col) { (a, f) } else { (f, a) }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.anchor == self.focus
+    }
+}
+
+/// Geometry of the last viewer layout, mapping pointer pixels to a content `(row, col)` and
+/// anchoring the selection highlight. Column 0 sits at `text_x`; each cell is `cw` wide.
+#[derive(Clone, Copy)]
+struct ViewerGeom {
+    text_x: f32,
+    content_y: f32,
+    line_h: f32,
+    cw: f32,
+    /// First content row drawn (the scroll offset), so a pointer pixel maps to an absolute row.
+    first: usize,
+}
+
+/// Cache key for [`ProjectPaneState::viewer_lines`]: the plain text is rebuilt only when the
+/// viewer's content identity (tab, path, layout/engine, line count) changes, so dragging a
+/// selection across a large file doesn't re-render it every frame.
+#[derive(Clone, PartialEq, Eq)]
+struct ViewerLinesKey {
+    kind: ViewerKind,
+    path: String,
+    split: bool,
+    difft: bool,
+    md_source: bool,
+    rows: usize,
 }
 
 /// Scroll offset of one pane view, in rows. Stored as `f32` so pixel-precise touchpad deltas
@@ -141,6 +208,16 @@ pub struct ProjectPaneState {
     pub(super) file_rows: Vec<(usize, String)>,
     /// `(changed-list index, rel_path)` of the changed-file rows registered by the last layout.
     pub(super) change_rows: Vec<(usize, String)>,
+    /// The center viewer's text selection (file preview / diff), if any.
+    viewer_sel: Option<ViewerSelection>,
+    /// Whether a viewer selection drag is currently in progress.
+    viewer_sel_dragging: bool,
+    /// Plain text of every viewer content row from the last layout, indexed by row. Used to clamp
+    /// selection columns and extract the selected text; rebuilt per [`ViewerLinesKey`].
+    viewer_lines: Vec<String>,
+    viewer_lines_key: Option<ViewerLinesKey>,
+    /// Pixel/row geometry from the last viewer layout, for pointer↔cell mapping and the highlight.
+    viewer_geom: Option<ViewerGeom>,
 }
 
 impl ProjectPaneState {
@@ -158,6 +235,7 @@ impl ProjectPaneState {
             },
         }
         self.viewer_focus = Some(kind);
+        self.clear_viewer_selection();
     }
 
     /// Focus the viewer tab of `kind`, when it is open (keeps its scroll position).
@@ -168,6 +246,7 @@ impl ProjectPaneState {
         };
         if open {
             self.viewer_focus = Some(kind);
+            self.clear_viewer_selection();
         }
     }
 
@@ -180,6 +259,7 @@ impl ProjectPaneState {
         if self.viewer_focus == Some(kind) {
             self.viewer_focus = None;
         }
+        self.clear_viewer_selection();
     }
 
     /// Scroll the focused viewer tab by `rows`.
@@ -209,6 +289,94 @@ impl ProjectPaneState {
         self.preview_tab = None;
         self.diff_tab = None;
         self.viewer_focus = None;
+        self.clear_viewer_selection();
+    }
+
+    /// Begin a viewer text selection at window-pixel `(x, y)` (mapped against the last layout's
+    /// geometry). Replaces any prior selection.
+    pub(super) fn begin_viewer_selection(&mut self, x: f32, y: f32) {
+        if let Some(pos) = self.viewer_pos_at(x, y) {
+            self.viewer_sel = Some(ViewerSelection { anchor: pos, focus: pos });
+            self.viewer_sel_dragging = true;
+        }
+    }
+
+    /// Extend the in-progress selection so its focus tracks pointer `(x, y)`.
+    pub(super) fn update_viewer_selection(&mut self, x: f32, y: f32) {
+        if !self.viewer_sel_dragging {
+            return;
+        }
+        if let (Some(pos), Some(sel)) = (self.viewer_pos_at(x, y), self.viewer_sel.as_mut()) {
+            sel.focus = pos;
+        }
+    }
+
+    /// End an in-progress selection drag, returning whether one was active (the selection itself
+    /// is kept for copying).
+    pub(super) fn end_viewer_selection_drag(&mut self) -> bool {
+        std::mem::take(&mut self.viewer_sel_dragging)
+    }
+
+    pub(super) fn is_dragging_viewer_selection(&self) -> bool {
+        self.viewer_sel_dragging
+    }
+
+    pub(super) fn clear_viewer_selection(&mut self) {
+        self.viewer_sel = None;
+        self.viewer_sel_dragging = false;
+    }
+
+    /// Map a window pixel to a content `(row, col)`, clamped to the laid-out rows and the target
+    /// row's display width. `None` when no viewer was laid out.
+    fn viewer_pos_at(&self, x: f32, y: f32) -> Option<ViewerPos> {
+        let g = self.viewer_geom.as_ref()?;
+        if self.viewer_lines.is_empty() {
+            return None;
+        }
+        let rel_row = ((y - g.content_y) / g.line_h).max(0.) as usize;
+        let row = (g.first + rel_row).min(self.viewer_lines.len() - 1);
+        let width = str_width(&self.viewer_lines[row]);
+        // Round to the nearest cell boundary so the caret sits between glyphs, like a text editor.
+        let col = (((x - g.text_x) / g.cw).round().max(0.) as usize).min(width);
+        Some(ViewerPos { row, col })
+    }
+
+    /// The selected viewer text, or `None` when no viewer is focused or the selection is empty.
+    /// Uses terminal-style line slicing (first row from its column to the line end, whole middle
+    /// rows, last row up to its column), trimming trailing whitespace per line.
+    pub(super) fn viewer_selection_text(&self) -> Option<String> {
+        self.viewer_focus?;
+        let sel = self.viewer_sel?;
+        if sel.is_empty() || self.viewer_lines.is_empty() {
+            return None;
+        }
+        let (start, end) = sel.ordered();
+        let last = self.viewer_lines.len() - 1;
+        let mut out = String::new();
+        for row in start.row.min(last)..=end.row.min(last) {
+            let line = &self.viewer_lines[row];
+            let width = str_width(line);
+            let c0 = if row == start.row { start.col } else { 0 };
+            let c1 = if row == end.row { end.col } else { width };
+            if row != start.row {
+                out.push('\n');
+            }
+            out.push_str(slice_cols(line, c0, c1).trim_end());
+        }
+        Some(out).filter(|text| !text.is_empty())
+    }
+
+    /// The selection's `[c0, c1)` column range on `row`, or `None` when the row is outside the
+    /// selection. The first row runs to `width` (its content end), middle rows span the full line.
+    fn selection_cols(&self, row: usize, width: usize) -> Option<(usize, usize)> {
+        let sel = self.viewer_sel.filter(|s| !s.is_empty())?;
+        let (start, end) = sel.ordered();
+        if row < start.row || row > end.row {
+            return None;
+        }
+        let c0 = if row == start.row { start.col } else { 0 }.min(width);
+        let c1 = if row == end.row { end.col } else { width }.min(width).max(c0);
+        Some((c0, c1))
     }
 
     /// Path of the directory row registered at `index` by the last layout.
@@ -612,6 +780,21 @@ pub(crate) fn layout(
         hits.push((region, hit));
         x += label_w + pad_x * 1.5;
     }
+
+    // Refresh affordance at the header's right edge: re-reads the directory tree and git status so
+    // files added/removed on disk and new changes show up.
+    let refresh = "刷新";
+    let refresh_w = str_width(refresh) as f32 * cw;
+    let refresh_x = x0 + pane_w - pad_x - refresh_w;
+    let refresh_region =
+        PixelRect { x: refresh_x - pad_x * 0.5, y: y0, w: refresh_w + pad_x, h: row_h };
+    if hover == Some(Hit::PaneRefresh) {
+        draw.rects.push(rect(refresh_region.x, y0 + hl_margin, refresh_region.w, hl_h,
+            chrome::hover_bg()));
+    }
+    push_text_px(&mut draw.cells, refresh_x, header_base, refresh, chrome::dim(), cw);
+    hits.push((refresh_region, Hit::PaneRefresh));
+
     draw.rects.push(rect(x0, y0 + row_h, pane_w, 1., chrome::border()));
 
     let content_y = y0 + row_h + 1.;
@@ -891,6 +1074,57 @@ fn push_spans(draw: &mut ChromeDraw, spans: &SpanLine, x: f32, base: f32, budget
     }
 }
 
+/// The concatenated plain text of a styled span line.
+fn spans_text(spans: &SpanLine) -> String {
+    spans.iter().map(|span| span.text.as_str()).collect()
+}
+
+/// The full plain text of one viewer row, laid out in the same display columns it is drawn at so a
+/// selection column maps to the same glyph. `right_col` is where a split row's right side begins.
+/// Diff body lines carry their `+`/`-`/space gutter (two columns) so a copied diff reads as one.
+fn row_text(row: &ViewerRow<'_>, right_col: usize) -> String {
+    match row {
+        ViewerRow::Text(spans) => spans_text(spans),
+        ViewerRow::Diff(line) => match line.kind {
+            DiffLineKind::Hunk => line.text.clone(),
+            DiffLineKind::Add => format!("+ {}", spans_text(&line.spans)),
+            DiffLineKind::Del => format!("- {}", spans_text(&line.spans)),
+            _ => format!("  {}", spans_text(&line.spans)),
+        },
+        ViewerRow::Split { left, right } => {
+            let l = left.map(|(spans, _)| spans_text(spans)).unwrap_or_default();
+            let r = right.map(|(spans, _)| spans_text(spans)).unwrap_or_default();
+            if r.is_empty() {
+                return l;
+            }
+            // Pad the gap between the two sides so the right text lands on `right_col`.
+            let mut out = l;
+            let pad = right_col.saturating_sub(str_width(&out)).max(1);
+            out.push_str(&" ".repeat(pad));
+            out.push_str(&r);
+            out
+        },
+        ViewerRow::Note(note) => note.to_string(),
+    }
+}
+
+/// The substring of `line` spanning display columns `[c0, c1)`. A wide glyph is included when its
+/// starting column falls in range.
+fn slice_cols(line: &str, c0: usize, c1: usize) -> String {
+    let mut col = 0;
+    let mut out = String::new();
+    for ch in line.chars() {
+        if col >= c1 {
+            break;
+        }
+        if col >= c0 {
+            out.push(ch);
+        }
+        col += ch.width().unwrap_or(0);
+    }
+    out
+}
+
 /// Lay out the center viewer over the terminal area `[x0, x1] × [y0, y1]` when one of the
 /// shared viewer tabs is focused, showing its file preview or diff. The whole region is
 /// registered as a hit so clicks never fall through to the terminal beneath.
@@ -910,6 +1144,10 @@ pub(crate) fn layout_viewer(
     pad_x: f32,
     row_h: f32,
 ) {
+    // Cleared up front so a not-focused / too-small frame leaves no stale geometry for the
+    // pointer mapping to hit.
+    state.viewer_geom = None;
+
     let Some(viewer) = state.focused_content() else { return };
     let w = x1 - x0;
     if w < cw * 8. || y1 - y0 < row_h * 2. {
@@ -1029,11 +1267,39 @@ pub(crate) fn layout_viewer(
     let text_budget = (((x1 - pad_x) - text_x) / cw).floor().max(1.) as usize;
     // Split rows divide the content at the midline: old file left, new file right.
     let mid = (x0 + w * 0.5).floor();
+
+    // Snapshot the geometry for pointer→cell mapping, and (re)build the per-row plain text the
+    // selection indexes into. The text is keyed so a drag across a large file doesn't re-render it.
+    state.viewer_geom = Some(ViewerGeom { text_x, content_y, line_h, cw, first });
+    if let Some(kind) = state.viewer_focus {
+        let key = ViewerLinesKey {
+            kind,
+            path: path.clone(),
+            split: state.diff_split,
+            difft: state.difft_mode,
+            md_source: state.md_source,
+            rows: rows.len(),
+        };
+        if state.viewer_lines_key.as_ref() != Some(&key) {
+            let right_col = ((mid + 1. - x0) / cw).round().max(0.) as usize;
+            state.viewer_lines = rows.iter().map(|row| row_text(row, right_col)).collect();
+            state.viewer_lines_key = Some(key);
+        }
+    }
+
     let mut y = content_y;
-    for row in rows.iter().skip(first) {
+    for (i, row) in rows.iter().enumerate().skip(first) {
         if y + line_h > y1 {
             break;
         }
+        // The selection highlight for this row is computed now but pushed after the row's body
+        // (below), so it layers over any diff tint while staying under the glyphs.
+        let sel_cols = state
+            .viewer_lines
+            .get(i)
+            .map(|line| str_width(line))
+            .and_then(|width| state.selection_cols(i, width));
+
         let base = baseline(y, line_h, ch);
         match row {
             ViewerRow::Text(spans) => {
@@ -1057,28 +1323,33 @@ pub(crate) fn layout_viewer(
                     if let Some((glyph, fg)) = marker {
                         push_text_px(&mut draw.cells, text_x, base, glyph, fg, cw);
                     }
-                    let body_x = text_x + cw * 1.5;
+                    // Body at column 2 (marker + one-cell gap), matching the "+ "/"- " gutter the
+                    // selection text carries, so a copied diff line reads correctly.
+                    let body_x = text_x + cw * 2.;
                     let budget = (((x1 - pad_x) - body_x) / cw).floor().max(1.) as usize;
                     push_spans(draw, &line.spans, body_x, base, budget, cw);
                 }
             },
             ViewerRow::Split { left, right } => {
-                for (side_x0, side_x1, side) in
-                    [(x0, mid, left), (mid + 1., x1, right)]
-                {
-                    let Some((spans, kind)) = side else { continue };
-                    let bg = match kind {
-                        DiffLineKind::Add => Some(add_bg()),
-                        DiffLineKind::Del => Some(del_bg()),
+                // A change row tints the present side by its kind and the absent side with a muted
+                // fill, so each modified line reads as old-on-left versus new-on-right.
+                let is_change = matches!(left, Some((_, DiffLineKind::Add | DiffLineKind::Del)))
+                    || matches!(right, Some((_, DiffLineKind::Add | DiffLineKind::Del)));
+                for (side_x0, side_x1, side) in [(x0, mid, left), (mid + 1., x1, right)] {
+                    let bg = match side {
+                        Some((_, DiffLineKind::Add)) => Some(add_bg()),
+                        Some((_, DiffLineKind::Del)) => Some(del_bg()),
+                        None if is_change => Some(absent_bg()),
                         _ => None,
                     };
                     if let Some(bg) = bg {
                         draw.rects.push(rect(side_x0, y, side_x1 - side_x0, line_h, bg));
                     }
-                    let tx = side_x0 + pad_x;
-                    let budget =
-                        (((side_x1 - pad_x * 0.5) - tx) / cw).floor().max(1.) as usize;
-                    push_spans(draw, spans, tx, base, budget, cw);
+                    if let Some((spans, _)) = side {
+                        let tx = side_x0 + pad_x;
+                        let budget = (((side_x1 - pad_x * 0.5) - tx) / cw).floor().max(1.) as usize;
+                        push_spans(draw, spans, tx, base, budget, cw);
+                    }
                 }
                 // The midline divider, over the side tints.
                 draw.rects.push(rect(mid, y, 1., line_h, chrome::border()));
@@ -1086,6 +1357,17 @@ pub(crate) fn layout_viewer(
             ViewerRow::Note(note) => {
                 push_note(draw, note, text_x, y, line_h, ch, cw);
             },
+        }
+
+        // Selection highlight: over the row's tint, under its glyphs (cells paint after all rects).
+        if let Some((c0, c1)) = sel_cols {
+            if c1 > c0 {
+                let hx = (text_x + c0 as f32 * cw).max(x0);
+                let hw = ((c1 - c0) as f32 * cw).min(x1 - hx).max(0.);
+                if hw > 0. {
+                    draw.rects.push(RenderRect::new(hx, y, hw, line_h, sel_bg(), SEL_ALPHA));
+                }
+            }
         }
         y += line_h;
     }

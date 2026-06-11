@@ -1449,6 +1449,19 @@ impl WindowContext {
         self.projects[self.active_project].pane.load_preview(path, width, md_source);
     }
 
+    /// Refresh the project pane's directory to the latest on-disk / git state: re-list the file
+    /// tree (picking up added/removed files), re-run git status (updating the Changes list, which
+    /// also refreshes an open diff), and reload an open file preview from disk.
+    fn refresh_pane_dir(&mut self) {
+        self.projects[self.active_project].pane.refresh_tree();
+        self.refresh_pane_git();
+        if let Some(path) = self.display.previewed_file() {
+            self.reload_preview(&path);
+        }
+        self.display.pending_update.dirty = true;
+        self.dirty = true;
+    }
+
     /// Switch the active project, carrying focus and updating the window title.
     pub fn select_project(&mut self, index: usize) {
         if index >= self.projects.len() {
@@ -2522,6 +2535,9 @@ impl WindowContext {
             }
             self.dirty = true;
         }
+        if actions.pane_refresh {
+            self.refresh_pane_dir();
+        }
         if actions.open_settings {
             let family = self.config.font.normal().family.clone();
             let size_pt = self.config.font.size().as_pt();
@@ -2590,6 +2606,11 @@ impl WindowContext {
 
     /// Copy the focused pane's selection to the system clipboard.
     pub fn copy_active_selection(&self, clipboard: &mut Clipboard) {
+        // A focused viewer tab (file preview / diff) owns the selection; prefer its text.
+        if let Some(text) = self.display.viewer_selection_text().filter(|s| !s.is_empty()) {
+            clipboard.store(ClipboardType::Clipboard, text);
+            return;
+        }
         if let Some(text) = self
             .active_tab()
             .focused()

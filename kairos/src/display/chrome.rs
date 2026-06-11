@@ -11,6 +11,7 @@
 use std::path::Path;
 
 use unicode_width::UnicodeWidthChar;
+use winit::window::CursorIcon;
 
 use kairos_terminal::index::{Column, Point};
 use kairos_terminal::term::cell::Flags;
@@ -366,6 +367,8 @@ pub enum Hit {
     PaneFileRow(usize),
     /// A changed-file row at this index into the pane's Changes list.
     PaneChangeRow(usize),
+    /// Refresh the project pane's directory tree and git status.
+    PaneRefresh,
     /// A shared viewer tab (预览 / diff) in the tab bar; focuses it.
     ViewerTab(ViewerKind),
     /// A shared viewer tab's close button.
@@ -400,6 +403,22 @@ pub enum Hit {
     /// Select the shell at this index into [`SettingsState::shells`] from the open dropdown.
     SettingsShellOption(usize),
     SettingsClose,
+}
+
+impl Hit {
+    /// The mouse cursor to show while hovering this control. Clickable rows, buttons, tabs and
+    /// dropdown options read as a pointer; text-selectable / editable surfaces keep the I-beam;
+    /// a dismiss-only modal backdrop stays the plain arrow.
+    pub fn cursor_icon(self) -> CursorIcon {
+        match self {
+            // The viewer body is a text-selection surface; the size box is typed into.
+            Hit::ViewerBackground | Hit::SettingsSizeField => CursorIcon::Text,
+            // Clicking the backdrop only dismisses the overlay — not a control.
+            Hit::ModalBackground => CursorIcon::Default,
+            // Everything else is a clickable control.
+            _ => CursorIcon::Pointer,
+        }
+    }
 }
 
 /// Draw lists produced for a single frame of chrome.
@@ -542,7 +561,33 @@ impl Chrome {
     /// Drop viewer focus back to the terminal (the tabs stay open), returning whether a viewer
     /// tab was focused.
     pub fn unfocus_viewer(&mut self) -> bool {
+        self.pane.clear_viewer_selection();
         self.pane.viewer_focus.take().is_some()
+    }
+
+    /// Begin a viewer text selection at window-pixel `(x, y)`.
+    pub fn begin_viewer_selection(&mut self, x: f32, y: f32) {
+        self.pane.begin_viewer_selection(x, y);
+    }
+
+    /// Extend the in-progress viewer selection toward `(x, y)`.
+    pub fn update_viewer_selection(&mut self, x: f32, y: f32) {
+        self.pane.update_viewer_selection(x, y);
+    }
+
+    /// End an in-progress viewer selection drag, returning whether one was active.
+    pub fn end_viewer_selection_drag(&mut self) -> bool {
+        self.pane.end_viewer_selection_drag()
+    }
+
+    /// Whether a viewer selection drag is currently in progress.
+    pub fn is_dragging_viewer_selection(&self) -> bool {
+        self.pane.is_dragging_viewer_selection()
+    }
+
+    /// The selected text in the focused viewer tab, if any.
+    pub fn viewer_selection_text(&self) -> Option<String> {
+        self.pane.viewer_selection_text()
     }
 
     /// Relative path held by the shared diff tab, if it is open.
@@ -573,6 +618,8 @@ impl Chrome {
     /// Switch the center viewer's diff layout between unified and side-by-side.
     pub fn set_viewer_split(&mut self, split: bool) {
         self.pane.diff_split = split;
+        // The row set (and so any selection's coordinates) changes with the layout.
+        self.pane.clear_viewer_selection();
     }
 
     /// Whether the center viewer's diff uses the side-by-side layout.
@@ -583,6 +630,7 @@ impl Chrome {
     /// Toggle difftastic rendering for the center viewer's diff, returning the new state.
     pub fn toggle_viewer_difft(&mut self) -> bool {
         self.pane.difft_mode = !self.pane.difft_mode;
+        self.pane.clear_viewer_selection();
         self.pane.difft_mode
     }
 
@@ -595,6 +643,7 @@ impl Chrome {
     /// source view is now active.
     pub fn toggle_md_source(&mut self) -> bool {
         self.pane.md_source = !self.pane.md_source;
+        self.pane.clear_viewer_selection();
         self.pane.md_source
     }
 
@@ -1294,17 +1343,20 @@ impl Chrome {
         let x = mx.min((win_w - w).max(0.));
         let y = my.min((win_h - h).max(0.));
 
-        // Popover surface with a hairline border.
-        draw.rects.push(rect(x, y, w, h, menu_bg()));
-        push_border(&mut draw.rects, x, y, w, h, border());
+        // The menu is an overlay popup: its surface and labels go in the overlay pass (painted
+        // after the base cells) so the opaque background covers any chrome text beneath it instead
+        // of having that text bleed through in the shared cells pass.
+        draw.overlay_rects.push(rect(x, y, w, h, menu_bg()));
+        push_border(&mut draw.overlay_rects, x, y, w, h, border());
 
         for (k, (label, hit)) in ITEMS.iter().enumerate() {
             let item_y = y + k as f32 * row_h;
             let region = PixelRect { x, y: item_y, w, h: row_h };
             if self.hover == Some(*hit) {
-                draw.rects.push(rect(x, item_y, w, row_h, hover_bg()));
+                draw.overlay_rects.push(rect(x, item_y, w, row_h, hover_bg()));
             }
-            push_text_px(&mut draw.cells, x + pad_x, baseline(item_y, row_h, ch), label, fg(), cw);
+            push_text_px(&mut draw.overlay_cells, x + pad_x, baseline(item_y, row_h, ch), label,
+                fg(), cw);
             self.hits.push((region, *hit));
         }
     }

@@ -293,6 +293,12 @@ fn numstat_path(raw: &str) -> String {
 }
 
 /// Produce the parsed unified diff for one changed file.
+///
+/// `--no-ext-diff` is essential: a user with `diff.external = difft` (or any external diff driver)
+/// in their git config would otherwise get the driver's pre-formatted side-by-side text instead of
+/// a native unified diff, which [`parse_diff`] can't read (no `+`/`-` markers → every line parses
+/// as context → the split view shows identical columns). The window has its own difftastic path
+/// ([`run_difft`]) for that look.
 fn run_diff(root: &Path, file: &ChangedFile) -> GitData {
     let output = match file.status {
         // Untracked files have no blob to diff against; `--no-index` against the null device
@@ -300,13 +306,14 @@ fn run_diff(root: &Path, file: &ChangedFile) -> GitData {
         // goes through a success-agnostic runner.
         GitFileStatus::Untracked => {
             let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
-            any_status_output("git", root, &["diff", "--no-index", "--", null, &file.path])
+            any_status_output("git", root, &["diff", "--no-ext-diff", "--no-index", "--", null,
+                &file.path])
         },
         // `HEAD` covers staged and unstaged changes alike; fall back to the index diff for repos
         // without any commit yet.
-        _ => git_output(root, &["diff", "HEAD", "--", &file.path])
+        _ => git_output(root, &["diff", "--no-ext-diff", "HEAD", "--", &file.path])
             .filter(|out| !out.is_empty())
-            .or_else(|| git_output(root, &["diff", "--", &file.path])),
+            .or_else(|| git_output(root, &["diff", "--no-ext-diff", "--", &file.path])),
     };
 
     let mut lines = output.map(|out| parse_diff(&out)).unwrap_or_default();

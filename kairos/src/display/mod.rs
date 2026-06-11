@@ -553,6 +553,8 @@ pub struct ChromeActions {
     pub viewer_toggle_difft: bool,
     /// Toggle the markdown preview between rendered output and source text.
     pub viewer_toggle_md_source: bool,
+    /// Refresh the project pane's directory tree and git status.
+    pub pane_refresh: bool,
     /// A settings-panel change to apply live and persist to disk.
     pub settings: Option<SettingsState>,
     /// The chrome's reserved size (top bar height or sidebar width) changed; the terminal layout
@@ -1695,10 +1697,24 @@ impl Display {
                     self.pending_update.dirty = true;
                     return true;
                 }
+                // While selecting in the center viewer, the focus follows the pointer.
+                if self.chrome.is_dragging_viewer_selection() {
+                    self.chrome.update_viewer_selection(x, y);
+                    self.window.set_mouse_cursor(CursorIcon::Text);
+                    self.pending_update.dirty = true;
+                    return true;
+                }
                 // Hovering a divider shows the resize cursor; consume so the terminal doesn't
                 // immediately overwrite it with the text cursor.
                 if self.chrome.over_divider(x) || self.chrome.over_pane_divider(x) {
                     self.window.set_mouse_cursor(CursorIcon::ColResize);
+                    return true;
+                }
+                // Over a chrome control (a row, button, tab…): show its cursor — a pointer for
+                // clickable controls, the I-beam for the viewer body — and consume so the terminal
+                // doesn't immediately reset it to the text cursor.
+                if let Some(hit) = self.chrome.hit_mouse() {
+                    self.window.set_mouse_cursor(hit.cursor_icon());
                     return true;
                 }
                 // Never consume other movement; the terminal still tracks the cursor.
@@ -1745,6 +1761,16 @@ impl Display {
                     return true;
                 }
                 if let Some(hit) = self.chrome.hit_mouse() {
+                    // A press on the viewer body starts a text selection rather than an action;
+                    // controls in the viewer header keep their own hits and fall through below.
+                    if hit == Hit::ViewerBackground {
+                        let (x, y) = self.chrome.last_mouse();
+                        self.chrome.begin_viewer_selection(x, y);
+                        self.chrome.context_menu = None;
+                        self.window.set_mouse_cursor(CursorIcon::Text);
+                        self.pending_update.dirty = true;
+                        return true;
+                    }
                     self.apply_chrome_hit(hit);
                     self.chrome.context_menu = None;
                     self.pending_update.dirty = true;
@@ -1765,11 +1791,12 @@ impl Display {
                 button: MouseButton::Left,
                 ..
             } => {
-                // Only consume the release that ends a divider drag; let the terminal see every
-                // other release (e.g. to finish a selection).
+                // Only consume the release that ends a divider drag or a viewer selection; let the
+                // terminal see every other release (e.g. to finish its own selection).
                 let sidebar_drag = self.chrome.end_divider_drag();
                 let pane_drag = self.chrome.end_pane_divider_drag();
-                sidebar_drag || pane_drag
+                let viewer_drag = self.chrome.end_viewer_selection_drag();
+                sidebar_drag || pane_drag || viewer_drag
             },
             WindowEvent::KeyboardInput { event: key_event, .. } => {
                 let pressed = key_event.state == ElementState::Pressed;
@@ -1894,6 +1921,7 @@ impl Display {
             Hit::PaneChangeRow(i) => {
                 self.chrome_actions.pane_toggle_diff = self.chrome.pane_change_path(i);
             },
+            Hit::PaneRefresh => self.chrome_actions.pane_refresh = true,
             Hit::ViewerTab(kind) => self.chrome.focus_viewer(kind),
             Hit::ViewerTabClose(kind) => self.chrome.close_viewer_tab(kind),
             Hit::ViewerClose => {
@@ -2037,6 +2065,12 @@ impl Display {
     /// Path of the file shown in the center viewer's preview, if any.
     pub fn previewed_file(&self) -> Option<String> {
         self.chrome.previewed_file().map(str::to_owned)
+    }
+
+    /// The selected text in the focused viewer tab (file preview / diff), if any. Preferred over
+    /// the terminal selection by the copy paths while a viewer is focused.
+    pub fn viewer_selection_text(&self) -> Option<String> {
+        self.chrome.viewer_selection_text()
     }
 
     /// Width of the viewer's text area in chrome cells (terminal columns), for sizing
