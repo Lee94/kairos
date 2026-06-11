@@ -223,8 +223,44 @@ pub enum Action {
     /// Create a new tab in the current window.
     CreateNewTab,
 
-    /// Close the active tab in the current window.
+    /// Close the active tab in the current window, with all of its panes.
     CloseTab,
+
+    /// Split the focused pane, opening a new terminal to its right.
+    SplitRight,
+
+    /// Split the focused pane, opening a new terminal below it.
+    SplitDown,
+
+    /// Close the focused pane (the tab itself when it is the last pane).
+    ClosePane,
+
+    /// Move pane focus to the pane left of the focused one.
+    FocusPaneLeft,
+
+    /// Move pane focus to the pane right of the focused one.
+    FocusPaneRight,
+
+    /// Move pane focus to the pane above the focused one.
+    FocusPaneUp,
+
+    /// Move pane focus to the pane below the focused one.
+    FocusPaneDown,
+
+    /// Move the focused pane's divider one cell to the left.
+    ResizePaneLeft,
+
+    /// Move the focused pane's divider one cell to the right.
+    ResizePaneRight,
+
+    /// Move the focused pane's divider one cell up.
+    ResizePaneUp,
+
+    /// Move the focused pane's divider one cell down.
+    ResizePaneDown,
+
+    /// Maximize the focused pane over the tab area, or restore the split layout.
+    TogglePaneZoom,
 
     /// Toggle the project sidebar.
     ToggleProjectSidebar,
@@ -563,13 +599,25 @@ fn common_keybindings() -> Vec<KeyBinding> {
         "c",    ModifiersState::CONTROL | ModifiersState::SHIFT, +BindingMode::VI, ~BindingMode::SEARCH; Action::ClearSelection;
         // In-window tabs.
         "t",      ModifiersState::CONTROL | ModifiersState::SHIFT;                                       Action::CreateNewTab;
-        "w",      ModifiersState::CONTROL | ModifiersState::SHIFT;                                       Action::CloseTab;
+        "w",      ModifiersState::CONTROL | ModifiersState::SHIFT;                                       Action::ClosePane;
         PageDown, ModifiersState::CONTROL;                                                               Action::SelectNextTab;
         PageUp,   ModifiersState::CONTROL;                                                               Action::SelectPreviousTab;
         Tab,      ModifiersState::CONTROL;                                                               Action::SelectNextTab;
         Tab,      ModifiersState::CONTROL | ModifiersState::SHIFT;                                       Action::SelectPreviousTab;
         "e",      ModifiersState::CONTROL | ModifiersState::SHIFT;                                       Action::ToggleProjectSidebar;
         "p",      ModifiersState::CONTROL | ModifiersState::SHIFT;                                       Action::ToggleCommandPalette;
+        // Split panes.
+        "d",        ModifiersState::CONTROL | ModifiersState::SHIFT;                                     Action::SplitRight;
+        "d",        ModifiersState::ALT | ModifiersState::SHIFT;                                         Action::SplitDown;
+        Enter,      ModifiersState::CONTROL | ModifiersState::SHIFT;                                     Action::TogglePaneZoom;
+        ArrowLeft,  ModifiersState::ALT;                                                                 Action::FocusPaneLeft;
+        ArrowRight, ModifiersState::ALT;                                                                 Action::FocusPaneRight;
+        ArrowUp,    ModifiersState::ALT;                                                                 Action::FocusPaneUp;
+        ArrowDown,  ModifiersState::ALT;                                                                 Action::FocusPaneDown;
+        ArrowLeft,  ModifiersState::ALT | ModifiersState::SHIFT;                                         Action::ResizePaneLeft;
+        ArrowRight, ModifiersState::ALT | ModifiersState::SHIFT;                                         Action::ResizePaneRight;
+        ArrowUp,    ModifiersState::ALT | ModifiersState::SHIFT;                                         Action::ResizePaneUp;
+        ArrowDown,  ModifiersState::ALT | ModifiersState::SHIFT;                                         Action::ResizePaneDown;
         "0",    ModifiersState::CONTROL;                                                                 Action::ResetFontSize;
         "=",    ModifiersState::CONTROL;                                                                 Action::IncreaseFontSize;
         "+",    ModifiersState::CONTROL;                                                                 Action::IncreaseFontSize;
@@ -637,6 +685,19 @@ pub fn platform_key_bindings() -> Vec<KeyBinding> {
         "b",    ModifiersState::SUPER, ~BindingMode::SEARCH;                   Action::SearchBackward;
         "+" => KeyLocation::Numpad, ModifiersState::SUPER;                     Action::IncreaseFontSize;
         "-" => KeyLocation::Numpad, ModifiersState::SUPER;                     Action::DecreaseFontSize;
+        // Split panes (Kaku-style).
+        "d",        ModifiersState::SUPER;                                     Action::SplitRight;
+        "d",        ModifiersState::SUPER | ModifiersState::SHIFT;             Action::SplitDown;
+        "w",        ModifiersState::SUPER | ModifiersState::SHIFT;             Action::ClosePane;
+        Enter,      ModifiersState::SUPER | ModifiersState::SHIFT;             Action::TogglePaneZoom;
+        ArrowLeft,  ModifiersState::SUPER | ModifiersState::ALT;               Action::FocusPaneLeft;
+        ArrowRight, ModifiersState::SUPER | ModifiersState::ALT;               Action::FocusPaneRight;
+        ArrowUp,    ModifiersState::SUPER | ModifiersState::ALT;               Action::FocusPaneUp;
+        ArrowDown,  ModifiersState::SUPER | ModifiersState::ALT;               Action::FocusPaneDown;
+        ArrowLeft,  ModifiersState::SUPER | ModifiersState::CONTROL;           Action::ResizePaneLeft;
+        ArrowRight, ModifiersState::SUPER | ModifiersState::CONTROL;           Action::ResizePaneRight;
+        ArrowUp,    ModifiersState::SUPER | ModifiersState::CONTROL;           Action::ResizePaneUp;
+        ArrowDown,  ModifiersState::SUPER | ModifiersState::CONTROL;           Action::ResizePaneDown;
     )
 }
 

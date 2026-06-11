@@ -436,6 +436,58 @@ configuration. See *kairos*(5) for full configuration format documentation.
 :  _"Control"_
 :[
 :  _"DecreaseFontSize"_
+|  _"D"_
+:  _"Control|Shift"_
+:[
+:  _"SplitRight"_
+|  _"D"_
+:  _"Alt|Shift"_
+:[
+:  _"SplitDown"_
+|  _"W"_
+:  _"Control|Shift"_
+:[
+:  _"ClosePane"_
+|  _"Enter"_
+:  _"Control|Shift"_
+:[
+:  _"TogglePaneZoom"_
+|  _"Left"_
+:  _"Alt"_
+:[
+:  _"FocusPaneLeft"_
+|  _"Right"_
+:  _"Alt"_
+:[
+:  _"FocusPaneRight"_
+|  _"Up"_
+:  _"Alt"_
+:[
+:  _"FocusPaneUp"_
+|  _"Down"_
+:  _"Alt"_
+:[
+:  _"FocusPaneDown"_
+|  _"Left"_
+:  _"Alt|Shift"_
+:[
+:  _"ResizePaneLeft"_
+|  _"Right"_
+:  _"Alt|Shift"_
+:[
+:  _"ResizePaneRight"_
+|  _"Up"_
+:  _"Alt|Shift"_
+:[
+:  _"ResizePaneUp"_
+|  _"Down"_
+:  _"Alt|Shift"_
+:[
+:  _"ResizePaneDown"_
+
+Note: the default _"Alt"_ and _"Alt|Shift"_ arrow bindings take precedence over the
+escape sequences some terminal applications expect for word jumps; rebind the
+_"FocusPane\*"_ / _"ResizePane\*"_ actions to restore them.
 
 ## Windows only
 
@@ -594,6 +646,54 @@ configuration. See *kairos*(5) for full configuration format documentation.
 :  _"Command"_
 :[
 :  _"SelectLastTab"_
+|  _"D"_
+:  _"Command"_
+:[
+:  _"SplitRight"_
+|  _"D"_
+:  _"Command|Shift"_
+:[
+:  _"SplitDown"_
+|  _"W"_
+:  _"Command|Shift"_
+:[
+:  _"ClosePane"_
+|  _"Enter"_
+:  _"Command|Shift"_
+:[
+:  _"TogglePaneZoom"_
+|  _"Left"_
+:  _"Command|Alt"_
+:[
+:  _"FocusPaneLeft"_
+|  _"Right"_
+:  _"Command|Alt"_
+:[
+:  _"FocusPaneRight"_
+|  _"Up"_
+:  _"Command|Alt"_
+:[
+:  _"FocusPaneUp"_
+|  _"Down"_
+:  _"Command|Alt"_
+:[
+:  _"FocusPaneDown"_
+|  _"Left"_
+:  _"Command|Control"_
+:[
+:  _"ResizePaneLeft"_
+|  _"Right"_
+:  _"Command|Control"_
+:[
+:  _"ResizePaneRight"_
+|  _"Up"_
+:  _"Command|Control"_
+:[
+:  _"ResizePaneUp"_
+|  _"Down"_
+:  _"Command|Control"_
+:[
+:  _"ResizePaneDown"_
 
 # SEE ALSO
 

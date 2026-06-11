@@ -87,7 +87,7 @@ pub enum ConfigCursorStyle {
 
 impl Default for ConfigCursorStyle {
     fn default() -> Self {
-        Self::Shape(CursorShape::default())
+        Self::WithBlinking { shape: CursorShape::default(), blinking: CursorBlinking::default() }
     }
 }
 
@@ -115,8 +115,8 @@ impl From<ConfigCursorStyle> for VteCursorStyle {
 #[derive(ConfigDeserialize, Serialize, Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum CursorBlinking {
     Never,
-    #[default]
     Off,
+    #[default]
     On,
     Always,
 }
@@ -139,9 +139,9 @@ impl From<CursorBlinking> for bool {
 
 #[derive(ConfigDeserialize, Serialize, Debug, Default, Eq, PartialEq, Copy, Clone, Hash)]
 pub enum CursorShape {
-    #[default]
     Block,
     Underline,
+    #[default]
     Beam,
 }
 

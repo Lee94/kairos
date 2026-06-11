@@ -13,18 +13,112 @@ use std::path::PathBuf;
 
 use log::{error, warn};
 use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
 
 /// Schema version. Bumped whenever the table layout changes; a mismatch drops and recreates the
 /// tables (session restore is best-effort, so losing one prior session on upgrade is acceptable).
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
+
+/// Maximum split-tree depth accepted when loading a layout; deeper trees are discarded.
+const MAX_LAYOUT_DEPTH: usize = 32;
+
+/// Maximum number of panes restored per tab; larger layouts are discarded.
+const MAX_LAYOUT_PANES: usize = 16;
+
+/// Direction a persisted split divides its area in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedSplitDirection {
+    Right,
+    Down,
+}
+
+/// Persisted pane layout of one tab: a binary split tree with per-leaf working directories.
+///
+/// Deliberately a separate serde type from the runtime split tree so the on-disk schema can't
+/// drift with runtime refactors.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SavedPaneLayout {
+    Leaf {
+        /// Working directory this pane's shell should be spawned in.
+        cwd: Option<PathBuf>,
+        /// Whether this pane was focused within its tab.
+        #[serde(default)]
+        focused: bool,
+    },
+    Split {
+        direction: SavedSplitDirection,
+        /// Fraction of the area given to `first`, clamped on load.
+        ratio: f32,
+        first: Box<SavedPaneLayout>,
+        second: Box<SavedPaneLayout>,
+    },
+}
+
+impl SavedPaneLayout {
+    /// Number of panes in this layout.
+    pub fn leaf_count(&self) -> usize {
+        match self {
+            SavedPaneLayout::Leaf { .. } => 1,
+            SavedPaneLayout::Split { first, second, .. } => {
+                first.leaf_count() + second.leaf_count()
+            },
+        }
+    }
+
+    /// In-order index of the leaf marked focused, if any.
+    pub fn focused_leaf_index(&self) -> Option<usize> {
+        fn walk(node: &SavedPaneLayout, index: &mut usize) -> Option<usize> {
+            match node {
+                SavedPaneLayout::Leaf { focused, .. } => {
+                    let position = *index;
+                    *index += 1;
+                    focused.then_some(position)
+                },
+                SavedPaneLayout::Split { first, second, .. } => {
+                    walk(first, index).or_else(|| walk(second, index))
+                },
+            }
+        }
+        walk(self, &mut 0)
+    }
+
+    fn depth(&self) -> usize {
+        match self {
+            SavedPaneLayout::Leaf { .. } => 1,
+            SavedPaneLayout::Split { first, second, .. } => 1 + first.depth().max(second.depth()),
+        }
+    }
+
+    fn clamp_ratios(&mut self) {
+        if let SavedPaneLayout::Split { ratio, first, second, .. } = self {
+            *ratio = if ratio.is_finite() { ratio.clamp(0.1, 0.9) } else { 0.5 };
+            first.clamp_ratios();
+            second.clamp_ratios();
+        }
+    }
+
+    /// Validate a loaded layout, clamping ratios; `None` when it is unusable (hand-edited or
+    /// corrupt databases must degrade to a single pane, never break restore).
+    fn sanitize(mut self) -> Option<Self> {
+        if self.depth() > MAX_LAYOUT_DEPTH || self.leaf_count() > MAX_LAYOUT_PANES {
+            return None;
+        }
+        self.clamp_ratios();
+        Some(self)
+    }
+}
 
 /// A single restored tab.
 #[derive(Debug, Clone, Default)]
 pub struct SavedTab {
-    /// Working directory the tab's shell should be spawned in.
+    /// Working directory the focused pane's shell should be spawned in.
     pub working_directory: Option<PathBuf>,
     /// Last title reported by the tab, used as the initial tab-bar label.
     pub title: String,
+    /// Pane split layout, `None` for single-pane tabs.
+    pub layout: Option<SavedPaneLayout>,
 }
 
 /// A single restored project with its tabs.
@@ -81,6 +175,7 @@ const SCHEMA: &str = "
         position         INTEGER NOT NULL,
         cwd              TEXT,
         title            TEXT NOT NULL,
+        layout           TEXT,
         PRIMARY KEY (window_key, project_position, position)
     );
 ";
@@ -129,8 +224,13 @@ impl SessionStore {
     /// Resolve the database path, creating its parent directory.
     ///
     /// Stored under the XDG state directory on Unix (`~/.local/state/kairos`) and the data
-    /// directory on Windows (`%APPDATA%\kairos`).
+    /// directory on Windows (`%APPDATA%\kairos`). `KAIROS_SESSION_DB` overrides the path
+    /// entirely, letting tests and development builds keep their sessions isolated.
     fn db_path() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("KAIROS_SESSION_DB") {
+            return Some(PathBuf::from(path));
+        }
+
         #[cfg(not(windows))]
         {
             match xdg::BaseDirectories::with_prefix("kairos").place_state_file("session.db") {
@@ -184,8 +284,8 @@ impl SessionStore {
                  VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
             let mut tab_stmt = tx.prepare(
-                "INSERT INTO tabs (window_key, project_position, position, cwd, title)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO tabs (window_key, project_position, position, cwd, title, layout)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for (pp, project) in win.projects.iter().enumerate() {
                 let root = project.root.as_ref().map(|p| p.to_string_lossy().into_owned());
@@ -199,7 +299,16 @@ impl SessionStore {
                 for (tp, tab) in project.tabs.iter().enumerate() {
                     let cwd =
                         tab.working_directory.as_ref().map(|p| p.to_string_lossy().into_owned());
-                    tab_stmt.execute(params![win.key, pp as i64, tp as i64, cwd, tab.title])?;
+                    let layout =
+                        tab.layout.as_ref().and_then(|l| serde_json::to_string(l).ok());
+                    tab_stmt.execute(params![
+                        win.key,
+                        pp as i64,
+                        tp as i64,
+                        cwd,
+                        tab.title,
+                        layout
+                    ])?;
                 }
             }
         }
@@ -249,7 +358,7 @@ impl SessionStore {
             "SELECT position, name, root, active FROM projects WHERE window_key = ?1 ORDER BY position",
         )?;
         let mut tab_stmt = self.conn.prepare(
-            "SELECT cwd, title FROM tabs WHERE window_key = ?1 AND project_position = ?2 ORDER BY position",
+            "SELECT cwd, title, layout FROM tabs WHERE window_key = ?1 AND project_position = ?2 ORDER BY position",
         )?;
 
         for win in &mut windows {
@@ -271,9 +380,21 @@ impl SessionStore {
                 project.tabs = tab_stmt
                     .query_map(params![win.key, *position], |row| {
                         let cwd: Option<String> = row.get(0)?;
+                        let layout: Option<String> = row.get(2)?;
+                        // A corrupt or oversized layout degrades to a single pane.
+                        let layout = layout.and_then(|json| {
+                            match serde_json::from_str::<SavedPaneLayout>(&json) {
+                                Ok(layout) => layout.sanitize(),
+                                Err(err) => {
+                                    warn!("session: discarding corrupt pane layout: {err}");
+                                    None
+                                },
+                            }
+                        });
                         Ok(SavedTab {
                             working_directory: cwd.map(PathBuf::from),
                             title: row.get(1)?,
+                            layout,
                         })
                     })?
                     .collect::<rusqlite::Result<_>>()?;
@@ -303,7 +424,7 @@ mod tests {
     use super::*;
 
     fn tab(cwd: &str, title: &str) -> SavedTab {
-        SavedTab { working_directory: Some(PathBuf::from(cwd)), title: title.into() }
+        SavedTab { working_directory: Some(PathBuf::from(cwd)), title: title.into(), layout: None }
     }
 
     fn project(name: &str, root: &str, active_tab: usize, tabs: Vec<SavedTab>) -> SavedProject {
@@ -409,6 +530,113 @@ mod tests {
             .execute("INSERT INTO windows (key, width, height, active) VALUES (5, 1, 1, 0)", [])
             .unwrap();
         assert!(store.load().is_empty());
+    }
+
+    #[test]
+    fn pane_layout_roundtrip() {
+        let store = SessionStore::in_memory();
+
+        let layout = SavedPaneLayout::Split {
+            direction: SavedSplitDirection::Right,
+            ratio: 0.4,
+            first: Box::new(SavedPaneLayout::Leaf {
+                cwd: Some(PathBuf::from("/left")),
+                focused: false,
+            }),
+            second: Box::new(SavedPaneLayout::Split {
+                direction: SavedSplitDirection::Down,
+                ratio: 0.6,
+                first: Box::new(SavedPaneLayout::Leaf {
+                    cwd: Some(PathBuf::from("/top")),
+                    focused: true,
+                }),
+                second: Box::new(SavedPaneLayout::Leaf { cwd: None, focused: false }),
+            }),
+        };
+
+        let mut split_tab = tab("/top", "split");
+        split_tab.layout = Some(layout.clone());
+        store.save_window(&SavedWindow {
+            key: 1,
+            width: 800,
+            height: 600,
+            active_project: 0,
+            projects: vec![project("p", "/p", 0, vec![split_tab, tab("/plain", "plain")])],
+        });
+
+        let loaded = store.load();
+        let tabs = &loaded[0].projects[0].tabs;
+        assert_eq!(tabs[0].layout, Some(layout));
+        assert_eq!(tabs[0].layout.as_ref().unwrap().leaf_count(), 3);
+        assert_eq!(tabs[0].layout.as_ref().unwrap().focused_leaf_index(), Some(1));
+        assert_eq!(tabs[1].layout, None);
+    }
+
+    #[test]
+    fn corrupt_pane_layout_degrades_to_single_pane() {
+        let store = SessionStore::in_memory();
+        store.save_window(&SavedWindow {
+            key: 1,
+            width: 1,
+            height: 1,
+            active_project: 0,
+            projects: vec![project("p", "/p", 0, vec![tab("/p", "t")])],
+        });
+        store
+            .conn
+            .execute("UPDATE tabs SET layout = '{not json'", [])
+            .unwrap();
+
+        let loaded = store.load();
+        assert_eq!(loaded[0].projects[0].tabs[0].layout, None);
+    }
+
+    #[test]
+    fn loaded_pane_layout_is_sanitized() {
+        let store = SessionStore::in_memory();
+        store.save_window(&SavedWindow {
+            key: 1,
+            width: 1,
+            height: 1,
+            active_project: 0,
+            projects: vec![project("p", "/p", 0, vec![tab("/p", "t")])],
+        });
+
+        // Out-of-range ratio gets clamped on load.
+        let skewed = serde_json::json!({
+            "type": "split",
+            "direction": "right",
+            "ratio": 7.5,
+            "first": { "type": "leaf", "cwd": null },
+            "second": { "type": "leaf", "cwd": null },
+        });
+        store
+            .conn
+            .execute("UPDATE tabs SET layout = ?1", params![skewed.to_string()])
+            .unwrap();
+        let loaded = store.load();
+        match loaded[0].projects[0].tabs[0].layout.as_ref().unwrap() {
+            SavedPaneLayout::Split { ratio, .. } => assert_eq!(*ratio, 0.9),
+            leaf => panic!("expected split, got {leaf:?}"),
+        }
+
+        // An absurdly deep tree is discarded entirely.
+        let mut deep = serde_json::json!({ "type": "leaf", "cwd": null });
+        for _ in 0..40 {
+            deep = serde_json::json!({
+                "type": "split",
+                "direction": "down",
+                "ratio": 0.5,
+                "first": { "type": "leaf", "cwd": null },
+                "second": deep,
+            });
+        }
+        store
+            .conn
+            .execute("UPDATE tabs SET layout = ?1", params![deep.to_string()])
+            .unwrap();
+        let loaded = store.load();
+        assert_eq!(loaded[0].projects[0].tabs[0].layout, None);
     }
 
     #[test]

@@ -534,9 +534,64 @@ impl ApplicationHandler<Event> for Processor {
                 }
             },
             // Close a specific tab (e.g. middle-click on the tab bar).
-            (EventType::CloseTab(terminal_id), Some(window_id)) => {
+            (EventType::CloseTab(tab_id), Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
-                    window_context.request_close_tab(terminal_id);
+                    window_context.request_close_tab(tab_id);
+                }
+            },
+            // Split the focused pane of the active tab.
+            (EventType::SplitPane(direction), Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    #[cfg(not(windows))]
+                    let working_directory = window_context.active_working_directory();
+                    #[cfg(windows)]
+                    let working_directory = None;
+
+                    if window_context.split_active_pane(
+                        self.proxy.clone(),
+                        direction,
+                        working_directory,
+                    ) {
+                        window_context.sync_tabs();
+                        self.save_session(window_id);
+                    }
+                }
+            },
+            // Close the focused pane (the tab itself when it is the last pane).
+            (EventType::ClosePane, Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    // The resulting Exit event performs the actual removal.
+                    window_context.request_close_focused_pane();
+                }
+            },
+            // Move pane focus within the active tab.
+            (EventType::FocusPane(direction), Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.focus_pane_direction(direction);
+                    window_context.sync_tabs();
+                    self.save_session(window_id);
+                }
+            },
+            (EventType::FocusNextPane, Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.focus_next_pane();
+                    window_context.sync_tabs();
+                    self.save_session(window_id);
+                }
+            },
+            // Grow the focused pane one cell in the given direction.
+            (EventType::ResizePane(direction), Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.resize_focused_pane(direction);
+                    window_context.sync_tabs();
+                    self.save_session(window_id);
+                }
+            },
+            // Maximize or restore the focused pane (transient view state; not persisted).
+            (EventType::TogglePaneZoom, Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.toggle_pane_zoom();
+                    window_context.sync_tabs();
                 }
             },
             // Create a new project rooted at the picked folder.
@@ -617,13 +672,13 @@ impl ApplicationHandler<Event> for Processor {
                         let proxy = self.proxy.clone();
                         let outcome = match self.windows.get_mut(window_id) {
                             Some(window_context) => {
-                                // Don't close the tab if the user asked to hold the window.
+                                // Don't close the pane if the user asked to hold the window.
                                 if window_context.display.window.hold {
                                     None
-                                } else if window_context.close_tab(proxy.clone(), terminal_id) {
+                                } else if window_context.close_pane(proxy.clone(), terminal_id) {
                                     Some(true)
                                 } else {
-                                    // A tab was closed but the window remains; refresh its layout.
+                                    // A pane was closed but the window remains; refresh its layout.
                                     window_context.sync_tabs();
                                     Some(false)
                                 }
@@ -808,8 +863,20 @@ pub enum EventType {
     CreateTab,
     /// Change the active tab of the window identified by the event's window id.
     SelectTab(TabSelection),
-    /// Close the tab with the given terminal id in the window identified by the event's window id.
+    /// Close the tab with the given tab id in the window identified by the event's window id.
     CloseTab(u64),
+    /// Split the focused pane of the active tab in the given direction.
+    SplitPane(SplitDirection),
+    /// Close the focused pane of the active tab (the tab itself when it is the last pane).
+    ClosePane,
+    /// Move pane focus within the active tab.
+    FocusPane(PaneDirection),
+    /// Move pane focus to the next pane of the active tab, wrapping (from the command palette).
+    FocusNextPane,
+    /// Grow the focused pane one cell in the given direction.
+    ResizePane(PaneDirection),
+    /// Maximize the focused pane over the tab area, or restore the split layout.
+    TogglePaneZoom,
     /// Copy the active tab's selection to the clipboard (from the egui context menu).
     Copy,
     /// Paste the clipboard into the active tab (from the egui context menu).
@@ -847,8 +914,26 @@ pub enum TabSelection {
     Previous,
     Last,
     Index(usize),
-    /// A specific tab by its stable terminal id (used for mouse clicks).
+    /// A specific tab by its stable tab id (used for mouse clicks).
     Id(u64),
+}
+
+/// Direction a pane split divides its area in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitDirection {
+    /// Side-by-side; the new pane goes to the right.
+    Right,
+    /// Stacked; the new pane goes below.
+    Down,
+}
+
+/// Direction for pane focus movement and keyboard pane resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneDirection {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 /// Regex search state.
@@ -968,10 +1053,14 @@ pub struct ActionContext<'a, N, T> {
     pub dirty: &'a mut bool,
     pub occluded: &'a mut bool,
     pub preserve_title: bool,
-    /// Title of the tab this context targets; updated when its terminal reports a new title.
+    /// Title of the pane this context targets; updated when its terminal reports a new title.
     pub tab_title: &'a mut String,
-    /// Whether the targeted tab is the window's active tab.
+    /// Whether the targeted pane is the focused pane of the window's active tab.
     pub is_active_tab: bool,
+    /// Geometry of the targeted pane's grid.
+    pub size_info: SizeInfo,
+    /// Id of the tab containing the targeted pane.
+    pub tab_id: u64,
     #[cfg(not(windows))]
     pub master_fd: RawFd,
     #[cfg(not(windows))]
@@ -992,6 +1081,11 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
 
     #[inline]
     fn size_info(&self) -> SizeInfo {
+        self.size_info
+    }
+
+    #[inline]
+    fn window_size_info(&self) -> SizeInfo {
         self.display.size_info
     }
 
@@ -1209,8 +1303,35 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     }
 
     fn close_active_tab(&mut self) {
-        // Exiting the active terminal removes its tab (or the window if it is the last tab).
+        // Close the entire tab — all of its panes — not just the focused pane.
+        let window_id = self.display.window.id();
+        let _ = self.event_proxy.send_event(Event::new(EventType::CloseTab(self.tab_id), window_id));
+    }
+
+    fn split_pane(&mut self, direction: SplitDirection) {
+        let window_id = self.display.window.id();
+        let _ = self.event_proxy.send_event(Event::new(EventType::SplitPane(direction), window_id));
+    }
+
+    fn close_pane(&mut self) {
+        // Exiting the bound pane's terminal removes that pane (the tab when it is the last
+        // pane, the window when it is the last tab) via the pane-aware Exit handling.
         self.terminal.exit();
+    }
+
+    fn focus_pane(&mut self, direction: PaneDirection) {
+        let window_id = self.display.window.id();
+        let _ = self.event_proxy.send_event(Event::new(EventType::FocusPane(direction), window_id));
+    }
+
+    fn resize_pane(&mut self, direction: PaneDirection) {
+        let window_id = self.display.window.id();
+        let _ = self.event_proxy.send_event(Event::new(EventType::ResizePane(direction), window_id));
+    }
+
+    fn toggle_pane_zoom(&mut self) {
+        let window_id = self.display.window.id();
+        let _ = self.event_proxy.send_event(Event::new(EventType::TogglePaneZoom, window_id));
     }
 
     fn close_window(&mut self) {
@@ -2268,6 +2389,12 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 | EventType::CreateTab
                 | EventType::SelectTab(_)
                 | EventType::CloseTab(_)
+                | EventType::SplitPane(_)
+                | EventType::ClosePane
+                | EventType::FocusPane(_)
+                | EventType::FocusNextPane
+                | EventType::ResizePane(_)
+                | EventType::TogglePaneZoom
                 | EventType::CreateProject(_)
                 | EventType::SelectProject(_)
                 | EventType::CloseProject(_)

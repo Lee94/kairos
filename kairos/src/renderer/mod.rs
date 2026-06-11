@@ -400,13 +400,20 @@ impl Renderer {
     #[inline]
     pub fn set_viewport(&self, size: &SizeInfo) {
         unsafe {
-            // Reduce the height by `top_extra` (reserves the top egui chrome) and shift the left
-            // origin by `left_extra` while shrinking the width (reserves the left project sidebar).
+            // The grid's drawable area is the window minus the four `*_extra` reservations
+            // (chrome tab bar, sidebar, and — for split panes — the space taken by other panes)
+            // and the padding inside that area. GL viewport y counts from the bottom edge.
             gl::Viewport(
                 size.padding_x() as i32 + size.left_extra() as i32,
-                size.padding_y() as i32,
-                size.width() as i32 - 2 * size.padding_x() as i32 - size.left_extra() as i32,
-                size.height() as i32 - 2 * size.padding_y() as i32 - size.top_extra() as i32,
+                size.padding_y() as i32 + size.bottom_extra() as i32,
+                size.width() as i32
+                    - 2 * size.padding_x() as i32
+                    - size.left_extra() as i32
+                    - size.right_extra() as i32,
+                size.height() as i32
+                    - 2 * size.padding_y() as i32
+                    - size.top_extra() as i32
+                    - size.bottom_extra() as i32,
             );
         }
     }
