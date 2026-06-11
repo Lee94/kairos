@@ -697,9 +697,9 @@ mod tests {
         #[rustfmt::skip]
         let term = mock_term("\
             testing66\r\n\
-            Kairos\n\
+            Alacritty\n\
             123\r\n\
-            Kairos\r\n\
+            Alacritty\r\n\
             123\
         ");
 
@@ -717,9 +717,9 @@ mod tests {
         #[rustfmt::skip]
         let term = mock_term("\
             testing66\r\n\
-            Kairos\n\
+            Alacritty\n\
             123\r\n\
-            Kairos\r\n\
+            Alacritty\r\n\
             123\
         ");
 
@@ -736,7 +736,7 @@ mod tests {
     fn nested_regex() {
         #[rustfmt::skip]
         let term = mock_term("\
-            Ala -> Kairos -> critty\r\n\
+            Ala -> Alacritty -> critty\r\n\
             critty\
         ");
 
@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn skip_dead_cell() {
-        let term = mock_term("kairos");
+        let term = mock_term("alacritty");
 
         // Make sure dead state cell is skipped when reversing.
         let mut regex = RegexSearch::new("alacrit").unwrap();
