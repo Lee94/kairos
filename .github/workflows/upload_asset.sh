@@ -6,7 +6,9 @@ if [ $# -lt 2 ]; then
     exit 1
 fi
 
-repo="kairos/kairos"
+# Target the repository the workflow runs in (GitHub Actions sets GITHUB_REPOSITORY,
+# e.g. "Lee94/alacritty"); fall back to that fork for local runs.
+repo="${GITHUB_REPOSITORY:-Lee94/alacritty}"
 file_path=$1
 bearer=$2
 

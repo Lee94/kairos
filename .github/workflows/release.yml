@@ -9,26 +9,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  macos:
-    runs-on: macos-latest
-
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: brew install scdoc
-      - name: Install ARM target
-        run: rustup update && rustup target add aarch64-apple-darwin && rustup target add x86_64-apple-darwin
-      - name: Test
-        run: cargo test --release --target=x86_64-apple-darwin
-      - name: Build ARM
-        run: cargo build --release --target=aarch64-apple-darwin
-      - name: Make DMG
-        run: make dmg-universal
-      - name: Upload Application
-        run: |
-          mv ./target/release/osx/Kairos.dmg ./Kairos-${GITHUB_REF##*/}.dmg
-          ./.github/workflows/upload_asset.sh ./Kairos-${GITHUB_REF##*/}.dmg $GITHUB_TOKEN
-
   windows:
     runs-on: windows-latest
 
@@ -58,37 +38,3 @@ jobs:
         run: |
           ./.github/workflows/upload_asset.sh \
             ./Kairos-${GITHUB_REF##*/}-installer.msi $GITHUB_TOKEN
-
-  linux:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install cmake pkg-config libfreetype6-dev libfontconfig1-dev \
-            libxcb-xfixes0-dev libxkbcommon-dev python3 scdoc
-      - name: Test
-        run: cargo test --release
-      - name: Generate manpages
-        run: |
-          scdoc < extra/man/kairos.1.scd | gzip -c > "./kairos.1.gz"
-          scdoc < extra/man/kairos-msg.1.scd | gzip -c > "./kairos-msg.1.gz"
-          scdoc < extra/man/kairos.5.scd | gzip -c > "./kairos.5.gz"
-          scdoc < extra/man/kairos-bindings.5.scd | gzip -c > "./kairos-bindings.5.gz"
-          scdoc < extra/man/kairos-escapes.7.scd | gzip -c > "./kairos-escapes.7.gz"
-      - name: Upload Assets
-        run: |
-          mv ./extra/logo/kairos-term.svg ./Kairos.svg
-          ./.github/workflows/upload_asset.sh ./Kairos.svg $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./kairos.1.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./kairos-msg.1.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./kairos.5.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./kairos-bindings.5.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./kairos-escapes.7.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/completions/kairos.bash $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/completions/kairos.fish $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/completions/_kairos $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/linux/Kairos.desktop $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/kairos.info $GITHUB_TOKEN
