@@ -514,8 +514,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // Don't launch URLs if mouse has moved.
         self.ctx.mouse_mut().block_hint_launcher = true;
 
-        if (lmb_pressed || rmb_pressed)
-            && (self.ctx.modifiers().state().shift_key() || !self.ctx.mouse_mode())
+        // The left button always drives text selection (see `on_mouse_press`), so a drag selects
+        // even while an application grabs the mouse. The right button only extends a selection
+        // outside mouse mode or with Shift held.
+        if lmb_pressed
+            || (rmb_pressed
+                && (self.ctx.modifiers().state().shift_key() || !self.ctx.mouse_mode()))
         {
             self.ctx.update_selection(point, cell_side);
         } else if cell_changed
@@ -632,8 +636,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     fn on_mouse_press(&mut self, button: MouseButton) {
-        // Handle mouse mode.
-        if !self.ctx.modifiers().state().shift_key() && self.ctx.mouse_mode() {
+        // Handle mouse mode. The left button is reserved for text selection so it can be dragged to
+        // select without holding Shift, even while an application (e.g. Claude Code) grabs the
+        // mouse; the other buttons and the scroll wheel are still reported to the application.
+        if button != MouseButton::Left
+            && !self.ctx.modifiers().state().shift_key()
+            && self.ctx.mouse_mode()
+        {
             self.ctx.mouse_mut().click_state = ClickState::None;
 
             let code = match button {
@@ -711,7 +720,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     fn on_mouse_release(&mut self, button: MouseButton) {
-        if !self.ctx.modifiers().state().shift_key() && self.ctx.mouse_mode() {
+        // Mirror `on_mouse_press`: the left button drives selection rather than being reported.
+        if button != MouseButton::Left
+            && !self.ctx.modifiers().state().shift_key()
+            && self.ctx.mouse_mode()
+        {
             let code = match button {
                 MouseButton::Left => 0,
                 MouseButton::Middle => 1,
@@ -1134,9 +1147,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             mouse_state
         } else if self.ctx.display().highlighted_hint.as_ref().is_some_and(hint_highlighted) {
             CursorIcon::Pointer
-        } else if !self.ctx.modifiers().state().shift_key() && self.ctx.mouse_mode() {
-            CursorIcon::Default
         } else {
+            // The left button always selects, even in mouse mode, so show the text cursor to
+            // signal that a drag will create a selection.
             CursorIcon::Text
         }
     }
