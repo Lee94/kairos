@@ -1,6 +1,6 @@
 [package]
 name = "kairos"
-version = "0.0.2"
+version = "0.0.3"
 authors = ["Christian Duerr <contact@christianduerr.com>", "Joe Wilm <joe@jwilm.com>"]
 license = "Apache-2.0"
 description = "A fast, cross-platform, OpenGL terminal emulator"

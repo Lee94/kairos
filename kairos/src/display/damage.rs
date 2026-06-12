@@ -62,6 +62,13 @@ impl DamageTracker {
         self.frames.swap(0, 1);
     }
 
+    /// Grid dimensions (screen lines, columns) the tracker is currently shaped for.
+    #[inline]
+    #[must_use]
+    pub fn dimensions(&self) -> (usize, usize) {
+        (self.screen_lines, self.columns)
+    }
+
     /// Resize the damage information in the tracker.
     pub fn resize(&mut self, screen_lines: usize, columns: usize) {
         self.screen_lines = screen_lines;
@@ -150,7 +157,13 @@ impl FrameDamage {
     /// Damage line for the given frame.
     #[inline]
     pub fn damage_line(&mut self, damage: LineDamageBounds) {
-        self.lines[damage.line].expand(damage.left, damage.right);
+        // `damage.line` comes from the terminal grid, which can briefly disagree with the
+        // tracker's line count across a resize/relayout (e.g. switching to a taller pane). Skip
+        // out-of-range lines instead of panicking; the relayout reshapes the tracker and fully
+        // damages the frame, so nothing is lost visually.
+        if let Some(line) = self.lines.get_mut(damage.line) {
+            line.expand(damage.left, damage.right);
+        }
     }
 
     #[inline]

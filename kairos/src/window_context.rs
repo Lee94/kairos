@@ -2210,7 +2210,6 @@ impl WindowContext {
         );
 
         let mut focused_size = None;
-        let mut focused_dims_changed = false;
         for (id, rect) in rects {
             let Some(pane) = tab.root_mut().pane_mut(id) else { continue };
             let mut size_info = SizeInfo::for_pane(&window_size, rect, padding.0, padding.1);
@@ -2226,9 +2225,6 @@ impl WindowContext {
                 pane.notifier.on_resize(size_info.into());
                 terminal.resize(size_info);
                 pane.search_state.clear_focused_match();
-                if id == focused_id {
-                    focused_dims_changed = true;
-                }
             }
             drop(terminal);
 
@@ -2240,10 +2236,18 @@ impl WindowContext {
         tab.dividers = dividers;
 
         // Keep the damage tracker shaped like the focused pane's grid (the partial-damage path
-        // only runs single-pane, where the focused pane is the whole content area).
-        if is_active && focused_dims_changed {
+        // only runs single-pane, where the focused pane is the whole content area). Resize
+        // whenever the tracker's dimensions differ from the focused pane — not only when *this*
+        // relayout resized the focused terminal. Switching tabs/projects can make a differently
+        // sized pane active without touching its (already correctly sized) terminal; gating on a
+        // resize this pass would leave the tracker shaped for the previous pane, and the partial
+        // damage path would then index past its shorter line array.
+        if is_active {
             if let Some(size_info) = focused_size {
-                self.display.damage_tracker.resize(size_info.screen_lines(), size_info.columns());
+                let dimensions = (size_info.screen_lines(), size_info.columns());
+                if self.display.damage_tracker.dimensions() != dimensions {
+                    self.display.damage_tracker.resize(dimensions.0, dimensions.1);
+                }
             }
         }
 
