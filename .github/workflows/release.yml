@@ -8,6 +8,11 @@ on:
   # the web UI before any trigger — push or dispatch — actually starts a run.
   workflow_dispatch:
 
+# The repository's default GITHUB_TOKEN is read-only, but creating the release
+# and uploading the portable exe / msi assets needs write access to contents.
+permissions:
+  contents: write
+
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   CARGO_TERM_COLOR: always
