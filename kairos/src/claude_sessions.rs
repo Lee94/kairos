@@ -4,14 +4,17 @@
 //! `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`, where `<encoded-cwd>` is the project's
 //! absolute path with every path separator, the drive-letter colon and dots flattened to `-` (so
 //! `D:\work\alacritty` becomes `D--work-alacritty` and `/home/me/proj` becomes `-home-me-proj`).
-//! This module enumerates those transcripts for a given project root and derives a short label (the
-//! first user prompt) for each, so the in-app sidebar can list them and resume one in a new tab.
+//! This module enumerates those transcripts for a given project root and derives a short label for
+//! each, so the in-app sidebar can list them and resume one in a new tab. To match the title shown
+//! by `claude --resume`, the label prefers Claude Code's AI-generated `ai-title` line (which is
+//! also what `/rename` rewrites) and only falls back to the first user prompt for sessions that
+//! don't have a title yet.
 //!
-//! Transcripts can be large (megabytes), but the label lives near the top, so only the first few
-//! lines of each file are read.
+//! Transcripts can be large (megabytes). The first prompt lives near the top and the latest
+//! `ai-title` near the end, so only the head and a bounded tail of each file are read.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -21,6 +24,10 @@ const MAX_SESSIONS_SHOWN: usize = 12;
 const MAX_SESSION_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 /// Lines read from the head of a transcript while searching for the first user prompt.
 const HEAD_LINES: usize = 40;
+/// Bytes read from the tail of a transcript while searching for the most recent `ai-title` line.
+/// Claude Code re-emits the title line frequently, so the latest one is comfortably within this
+/// window even after large tool outputs.
+const TAIL_BYTES: u64 = 256 * 1024;
 
 /// A Claude Code session transcript that can be resumed.
 #[derive(Debug, Clone)]
@@ -66,7 +73,11 @@ pub fn sessions_for(root: &Path) -> Vec<ClaudeSession> {
     found
         .into_iter()
         .map(|(id, path, _)| {
-            let label = read_label(&path).unwrap_or_else(|| "(no prompt)".to_owned());
+            // Mirror `claude --resume`'s title precedence: the AI-generated (or `/rename`d) title
+            // wins, otherwise fall back to the first user prompt.
+            let label = read_ai_title(&path)
+                .or_else(|| read_label(&path))
+                .unwrap_or_else(|| "(no prompt)".to_owned());
             ClaudeSession { id, label }
         })
         .collect()
@@ -94,6 +105,54 @@ fn encode_root(root: &Path) -> String {
 /// stray filenames before they ever reach a `claude --resume <id>` command.
 fn is_session_id(s: &str) -> bool {
     (10..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+/// Read the session title that `claude --resume` shows: the most recent `ai-title`.
+///
+/// Claude Code periodically appends `{"type":"ai-title","aiTitle":"…"}` lines carrying the
+/// AI-generated title, and `/rename` rewrites it the same way, so the title can change over a
+/// session's life and the *last* line wins. Those lines sit near the end of the transcript, so we
+/// seek to a bounded tail rather than reading the whole (potentially huge) file.
+///
+/// Returns `None` when the file can't be read or carries no `ai-title` line in the tail window, so
+/// callers fall back to the first user prompt.
+fn read_ai_title(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    last_ai_title(&bytes, start > 0)
+}
+
+/// Scan a transcript tail for the last `ai-title` label. When `partial_head` is true the slice
+/// began mid-file (a non-zero seek), so the bytes before the first newline are a partial line and
+/// are dropped; each remaining newline-delimited line is whole and parsed as JSON.
+fn last_ai_title(bytes: &[u8], partial_head: bool) -> Option<String> {
+    let slice = if partial_head {
+        let nl = bytes.iter().position(|&b| b == b'\n')?;
+        &bytes[nl + 1..]
+    } else {
+        bytes
+    };
+    let mut last = None;
+    for line in slice.split(|&b| b == b'\n') {
+        let Ok(text) = std::str::from_utf8(line) else { continue };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else { continue };
+        if value.get("type").and_then(|t| t.as_str()) != Some("ai-title") {
+            continue;
+        }
+        let Some(title) = value.get("aiTitle").and_then(|t| t.as_str()) else { continue };
+        let label = clean_label(title);
+        if !label.is_empty() {
+            last = Some(label);
+        }
+    }
+    last
 }
 
 /// Derive a one-line label from the head of a transcript: the first genuinely typed user prompt,
@@ -246,6 +305,31 @@ mod tests {
             "Caveat: stuff"
         );
         assert_eq!(clean_label("<system-reminder>note</system-reminder> hi"), "note hi");
+    }
+
+    #[test]
+    fn ai_title_last_one_wins() {
+        // Claude re-emits the title; a later `/rename` supersedes the original.
+        let data = b"{\"type\":\"user\"}\n\
+            {\"type\":\"ai-title\",\"aiTitle\":\"Add split-screen support\"}\n\
+            {\"type\":\"ai-title\",\"aiTitle\":\"kairos-split-panes\"}\n";
+        assert_eq!(last_ai_title(data, false).as_deref(), Some("kairos-split-panes"));
+    }
+
+    #[test]
+    fn ai_title_drops_partial_leading_line() {
+        // A tail seek lands mid-line; that broken first line must be ignored, not mis-parsed.
+        let data = b"itle\":\"Broken partial\"}\n\
+            {\"type\":\"ai-title\",\"aiTitle\":\"Real title\"}\n";
+        assert_eq!(last_ai_title(data, true).as_deref(), Some("Real title"));
+        // Without a newline there is no whole line to trust.
+        assert_eq!(last_ai_title(b"itle\":\"Broken partial\"}", true), None);
+    }
+
+    #[test]
+    fn ai_title_absent_falls_through() {
+        let data = b"{\"type\":\"user\"}\n{\"type\":\"system\"}\n";
+        assert_eq!(last_ai_title(data, false), None);
     }
 
     #[test]
