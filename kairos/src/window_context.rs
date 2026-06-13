@@ -1213,12 +1213,40 @@ impl WindowContext {
             self.display.window.winit_window().request_inner_size(PhysicalSize::new(width, height));
     }
 
-    /// Spawn a new tab in the active project and focus it.
+    /// Spawn a new tab in the active project and focus it. Returns whether the tab was created.
     ///
     /// When the active project has a root folder it takes precedence, so tabs opened inside a
     /// project always start in the project directory.
-    pub fn add_tab(&mut self, proxy: EventLoopProxy<Event>, working_directory: Option<PathBuf>) {
-        self.spawn_tab_in(self.active_project, proxy, working_directory);
+    pub fn add_tab(
+        &mut self,
+        proxy: EventLoopProxy<Event>,
+        working_directory: Option<PathBuf>,
+    ) -> bool {
+        self.spawn_tab_in(self.active_project, proxy, working_directory)
+    }
+
+    /// Spawn a fresh shell tab in the active project, then type `command` into it (submitted with
+    /// the `\r` the shell's line discipline treats as Enter — a `\n` would only insert the text).
+    /// Seeds the tab `title` when non-empty and records `claude_session` for resume deduplication.
+    /// Does nothing when the tab fails to spawn, so the command never leaks into a pre-existing pane.
+    fn spawn_command_tab(
+        &mut self,
+        proxy: EventLoopProxy<Event>,
+        command: Vec<u8>,
+        title: String,
+        claude_session: Option<String>,
+    ) {
+        if !self.add_tab(proxy, None) {
+            return;
+        }
+        if let Some(tab) = self.projects[self.active_project].tabs.last_mut() {
+            let pane = tab.focused_mut();
+            pane.claude_session = claude_session;
+            pane.notifier.notify(command);
+            if !title.is_empty() {
+                pane.title = title;
+            }
+        }
     }
 
     /// Spawn a fresh shell tab in `project_index`, rooted at the project folder (falling back to
@@ -1290,20 +1318,19 @@ impl WindowContext {
             .find(|s| s.id == session_id)
             .map(|s| s.label.clone());
 
-        self.add_tab(proxy, None);
+        let command = format!("claude --resume {session_id}\r").into_bytes();
+        self.spawn_command_tab(proxy, command, label.unwrap_or_default(), Some(session_id));
+    }
 
-        // Submit with a carriage return, not a line feed: a terminal sends `\r` for Enter, and the
-        // shell's line discipline (or Windows ConPTY) only treats `\r` as line submission. Writing
-        // `\n` here just inserts the text without running it.
-        let command = format!("claude --resume {session_id}\r");
-        if let Some(tab) = self.projects[project_index].tabs.last_mut() {
-            let pane = tab.focused_mut();
-            pane.claude_session = Some(session_id.clone());
-            pane.notifier.notify(command.into_bytes());
-            if let Some(label) = label.filter(|l| !l.is_empty()) {
-                pane.title = label;
-            }
-        }
+    /// Open a new tab that starts a fresh Claude Code session.
+    ///
+    /// Like [`Self::open_claude_session`] but runs `claude` without `--resume`, so a new
+    /// conversation begins. Spawns a normal shell rooted at the active project folder (falling back
+    /// to the default working directory when no project is open), then types `claude` into it so a
+    /// usable prompt remains after the session ends.
+    pub fn new_claude_tab(&mut self, proxy: EventLoopProxy<Event>) {
+        // Seed a title so the tab reads "Claude" until the CLI emits its own OSC title.
+        self.spawn_command_tab(proxy, b"claude\r".to_vec(), "Claude".to_owned(), None);
     }
 
     /// Create a new project rooted at `root` (with one tab) and switch to it.
@@ -2441,6 +2468,9 @@ impl WindowContext {
         let window_id = self.display.window.id();
         if actions.create {
             let _ = proxy.send_event(Event::new(EventType::CreateTab, window_id));
+        }
+        if actions.create_claude {
+            let _ = proxy.send_event(Event::new(EventType::CreateClaudeTab, window_id));
         }
         if let Some(id) = actions.select {
             let event = Event::new(EventType::SelectTab(TabSelection::Id(id)), window_id);

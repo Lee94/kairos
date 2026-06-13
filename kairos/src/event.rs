@@ -521,6 +521,14 @@ impl ApplicationHandler<Event> for Processor {
                     self.save_session(window_id);
                 }
             },
+            // Open a new tab running a fresh Claude Code session.
+            (EventType::CreateClaudeTab, Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.new_claude_tab(self.proxy.clone());
+                    window_context.sync_tabs();
+                    self.save_session(window_id);
+                }
+            },
             // Change the active tab of a window.
             (EventType::SelectTab(selection), Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
@@ -875,6 +883,8 @@ pub enum EventType {
     CreateWindow(WindowOptions),
     /// Create a new tab in the window identified by the event's window id.
     CreateTab,
+    /// Create a new tab running the Claude Code CLI in the window identified by the event's id.
+    CreateClaudeTab,
     /// Change the active tab of the window identified by the event's window id.
     SelectTab(TabSelection),
     /// Close the tab with the given tab id in the window identified by the event's window id.
@@ -2409,6 +2419,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 | EventType::ConfigReload(_)
                 | EventType::CreateWindow(_)
                 | EventType::CreateTab
+                | EventType::CreateClaudeTab
                 | EventType::SelectTab(_)
                 | EventType::CloseTab(_)
                 | EventType::SplitPane(_)

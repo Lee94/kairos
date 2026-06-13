@@ -114,6 +114,7 @@ const MAX_FONT_PT: f32 = 72.;
 pub enum PaletteCmd {
     Settings,
     NewTab,
+    NewClaude,
     NewProject,
     ToggleSidebar,
     ToggleProjectPane,
@@ -129,6 +130,11 @@ pub enum PaletteCmd {
 pub const PALETTE_COMMANDS: &[(&str, &str, PaletteCmd)] = &[
     ("设置", "settings preferences config shezhi peizhi", PaletteCmd::Settings),
     ("新建标签页", "new tab xinjian biaoqianye", PaletteCmd::NewTab),
+    (
+        "新建 Claude Code 终端",
+        "new claude code terminal ai xinjian zhongduan kelaode",
+        PaletteCmd::NewClaude,
+    ),
     ("新建项目", "new project folder xinjian xiangmu", PaletteCmd::NewProject),
     ("切换侧边栏", "toggle sidebar qiehuan cebianlan", PaletteCmd::ToggleSidebar),
     (
@@ -354,6 +360,13 @@ pub enum Hit {
     SelectTab(u64),
     CloseTab(u64),
     CreateTab,
+    /// Toggle the new-tab dropdown opened by the `▼` next to the `+` affordance.
+    NewTabMenu,
+    /// Create a normal shell tab from the new-tab dropdown. Same action as [`Hit::CreateTab`], but a
+    /// distinct variant so hovering this menu row doesn't also highlight the `+` button.
+    CreateShellTab,
+    /// Create a new tab that launches the Claude Code CLI (from the new-tab dropdown or palette).
+    CreateClaudeTab,
     SelectProject(usize),
     CloseProject(usize),
     CreateProject,
@@ -451,6 +464,11 @@ pub struct Chrome {
     pub pane_visible: bool,
     /// Window-pixel position the right-click context menu was opened at, if any.
     pub context_menu: Option<(f32, f32)>,
+    /// Whether the new-tab dropdown (the `▼` next to the `+`) is expanded.
+    new_tab_menu: bool,
+    /// Window-pixel `(x, drop_y)` anchor of the new-tab dropdown, recorded while laying out the tab
+    /// bar so the menu can be drawn (with its hit regions on top) after the rest of the chrome.
+    new_tab_anchor: (f32, f32),
     /// Last observed mouse position in window pixels.
     mouse: (f32, f32),
     /// Hot regions from the most recent [`Self::layout`], topmost last.
@@ -494,6 +512,8 @@ impl Chrome {
             sidebar_visible: true,
             pane_visible: true,
             context_menu: None,
+            new_tab_menu: false,
+            new_tab_anchor: (0., 0.),
             mouse: (0., 0.),
             hits: Vec::new(),
             hover: None,
@@ -718,6 +738,7 @@ impl Chrome {
             self.command_palette = Some(PaletteState::default());
             self.settings = None;
             self.context_menu = None;
+            self.new_tab_menu = false;
         }
     }
 
@@ -726,6 +747,23 @@ impl Chrome {
         self.settings = Some(state);
         self.command_palette = None;
         self.context_menu = None;
+        self.new_tab_menu = false;
+    }
+
+    /// Toggle the new-tab dropdown (the `▼` next to the `+` affordance). Opening it closes the other
+    /// overlays, keeping the chrome's popups mutually exclusive.
+    pub fn toggle_new_tab_menu(&mut self) {
+        self.new_tab_menu = !self.new_tab_menu;
+        if self.new_tab_menu {
+            self.command_palette = None;
+            self.settings = None;
+            self.context_menu = None;
+        }
+    }
+
+    /// Close the new-tab dropdown, returning whether it was open.
+    pub fn close_new_tab_menu(&mut self) -> bool {
+        std::mem::take(&mut self.new_tab_menu)
     }
 
     /// Whether the command palette or settings panel is open.
@@ -743,12 +781,14 @@ impl Chrome {
         self.settings.is_some()
     }
 
-    /// Close every overlay (palette, settings, context menu). Returns whether any was open.
+    /// Close every overlay (palette, settings, context menu, new-tab dropdown). Returns whether any
+    /// was open.
     pub fn close_modals(&mut self) -> bool {
-        let was_open = self.modal_open() || self.context_menu.is_some();
+        let was_open = self.modal_open() || self.context_menu.is_some() || self.new_tab_menu;
         self.command_palette = None;
         self.settings = None;
         self.context_menu = None;
+        self.new_tab_menu = false;
         was_open
     }
 
@@ -1069,6 +1109,11 @@ impl Chrome {
         if self.context_menu.is_some() {
             self.layout_context_menu(&mut draw, cw, ch, win_w, win_h, pad_x, row_h);
         }
+        // The new-tab dropdown is anchored to the `+` affordance recorded during `layout_tab_bar`,
+        // but drawn here so its hit regions stack above the terminal area / project pane beneath it.
+        if self.new_tab_menu {
+            self.layout_new_tab_menu(&mut draw, cw, ch, win_w, win_h, pad_x, row_h);
+        }
         // The settings panel and command palette are mutually exclusive overlays drawn on top.
         if let Some(state) = self.settings.clone() {
             self.layout_settings(&state, &mut draw, cw, ch, win_w, win_h, pad_x, row_h);
@@ -1289,14 +1334,28 @@ impl Chrome {
             x += seg_w + tab_gap;
         }
 
-        // New-tab affordance.
-        if x + cw + pad_x <= win_w {
-            let region = PixelRect { x: x - pad_x * 0.5, y: 0., w: cw + pad_x, h: bar_h };
+        // New-tab split affordance: clicking `+` opens a normal shell tab; clicking the `▼` opens a
+        // dropdown offering other terminal kinds (e.g. a Claude Code terminal). The dropdown itself
+        // is drawn later in `layout` (see `layout_new_tab_menu`) so its hits land on top.
+        if x + 2. * cw + pad_x <= win_w {
+            let plus_region = PixelRect { x: x - pad_x * 0.5, y: 0., w: cw + pad_x * 0.5, h: bar_h };
             if self.hover == Some(Hit::CreateTab) {
-                draw.rects.push(rect(x - pad_x * 0.5, hl_margin, cw + pad_x, hl_h, hover_bg()));
+                draw.rects.push(rect(x - pad_x * 0.5, hl_margin, cw + pad_x * 0.5, hl_h, hover_bg()));
             }
             push_text_px(&mut draw.cells, x, base, "+", fg(), cw);
-            self.hits.push((region, Hit::CreateTab));
+            self.hits.push((plus_region, Hit::CreateTab));
+
+            let arrow_x = x + cw;
+            let arrow_region = PixelRect { x: arrow_x, y: 0., w: cw + pad_x * 0.5, h: bar_h };
+            if self.new_tab_menu || self.hover == Some(Hit::NewTabMenu) {
+                draw.rects.push(rect(arrow_x, hl_margin, cw + pad_x * 0.5, hl_h, hover_bg()));
+            }
+            let arrow = if self.new_tab_menu { "▲" } else { "▼" };
+            push_text_px(&mut draw.cells, arrow_x, base, arrow, dim(), cw);
+            self.hits.push((arrow_region, Hit::NewTabMenu));
+
+            // Anchor the dropdown under the `+`, dropping below the tab bar.
+            self.new_tab_anchor = (x - pad_x * 0.5, bar_h);
         }
     }
 
@@ -1354,6 +1413,49 @@ impl Chrome {
             let region = PixelRect { x, y: item_y, w, h: row_h };
             if self.hover == Some(*hit) {
                 draw.overlay_rects.push(rect(x, item_y, w, row_h, hover_bg()));
+            }
+            push_text_px(&mut draw.overlay_cells, x + pad_x, baseline(item_y, row_h, ch), label,
+                fg(), cw);
+            self.hits.push((region, *hit));
+        }
+    }
+
+    /// The new-tab dropdown opened by the `▼` split-button affordance: a small overlay menu of the
+    /// terminal kinds that can be created, anchored under the `+` at [`Self::new_tab_anchor`].
+    #[allow(clippy::too_many_arguments)]
+    fn layout_new_tab_menu(
+        &mut self,
+        draw: &mut ChromeDraw,
+        cw: f32,
+        ch: f32,
+        win_w: f32,
+        win_h: f32,
+        pad_x: f32,
+        row_h: f32,
+    ) {
+        const ITEMS: [(&str, Hit); 2] = [
+            ("新建终端", Hit::CreateShellTab),
+            ("新建 Claude Code 终端", Hit::CreateClaudeTab),
+        ];
+
+        let (anchor_x, drop_y) = self.new_tab_anchor;
+        // Width fits the widest label plus padding on both sides.
+        let cols = ITEMS.iter().map(|(label, _)| str_width(label)).max().unwrap_or(0);
+        let w = (cols as f32) * cw + 2. * pad_x;
+        let h = ITEMS.len() as f32 * row_h;
+        let x = anchor_x.min((win_w - w).max(0.));
+        let y = drop_y.min((win_h - h).max(0.));
+
+        // Overlay pass: opaque surface + labels paint after the base cells so chrome text beneath
+        // the menu doesn't bleed through.
+        draw.overlay_rects.push(rect(x, y, w, h, menu_bg()));
+        push_border(&mut draw.overlay_rects, x, y, w, h, border());
+
+        for (k, (label, hit)) in ITEMS.iter().enumerate() {
+            let item_y = y + k as f32 * row_h;
+            let region = PixelRect { x, y: item_y, w, h: row_h };
+            if self.hover == Some(*hit) {
+                draw.overlay_rects.push(rect(x + 1., item_y, w - 2., row_h, hover_bg()));
             }
             push_text_px(&mut draw.overlay_cells, x + pad_x, baseline(item_y, row_h, ch), label,
                 fg(), cw);

@@ -515,6 +515,8 @@ pub struct ChromeActions {
     pub close: Option<u64>,
     /// Create a new tab.
     pub create: bool,
+    /// Create a new tab that launches the Claude Code CLI (from the new-tab dropdown or palette).
+    pub create_claude: bool,
     /// Split the focused pane in this direction (from the command palette).
     pub split_pane: Option<SplitDirection>,
     /// Close the focused pane (from the command palette).
@@ -811,6 +813,8 @@ impl Display {
 
     /// Open the right-click context menu anchored at the given window pixel position.
     pub fn open_context_menu(&mut self, x: usize, y: usize) {
+        // Keep the chrome's popups mutually exclusive: a right-click dismisses the new-tab dropdown.
+        self.chrome.close_new_tab_menu();
         self.chrome.context_menu = Some((x as f32, y as f32));
     }
 
@@ -1007,8 +1011,9 @@ impl Display {
             let renderer_update = self.pending_renderer_update.get_or_insert(Default::default());
             renderer_update.resize = true;
 
-            // The context menu's anchor is tied to the old layout; close it on resize.
+            // The context menu and new-tab dropdown are anchored to the old layout; close on resize.
             self.chrome.context_menu = None;
+            self.chrome.close_new_tab_menu();
         }
         self.size_info = new_size;
     }
@@ -1767,6 +1772,7 @@ impl Display {
                         let (x, y) = self.chrome.last_mouse();
                         self.chrome.begin_viewer_selection(x, y);
                         self.chrome.context_menu = None;
+                        self.chrome.close_new_tab_menu();
                         self.window.set_mouse_cursor(CursorIcon::Text);
                         self.pending_update.dirty = true;
                         return true;
@@ -1852,7 +1858,9 @@ impl Display {
                 // the terminal; only consume the key when it did one of those.
                 if pressed
                     && *key == Key::Named(NamedKey::Escape)
-                    && (self.chrome.context_menu.take().is_some() || self.chrome.unfocus_viewer())
+                    && (self.chrome.context_menu.take().is_some()
+                        || self.chrome.close_new_tab_menu()
+                        || self.chrome.unfocus_viewer())
                 {
                     self.pending_update.dirty = true;
                     return true;
@@ -1888,6 +1896,11 @@ impl Display {
 
     /// Translate a chrome hit into a queued [`ChromeActions`] entry.
     fn apply_chrome_hit(&mut self, hit: Hit) {
+        // Any click other than the dropdown's own toggle dismisses the new-tab dropdown (selecting
+        // one of its items closes it too, then falls through to the item's action below).
+        if hit != Hit::NewTabMenu {
+            self.chrome.close_new_tab_menu();
+        }
         match hit {
             // Selecting or creating a terminal tab takes focus back from the viewer tabs.
             Hit::SelectTab(id) => {
@@ -1895,9 +1908,15 @@ impl Display {
                 self.chrome_actions.select = Some(id);
             },
             Hit::CloseTab(id) => self.chrome_actions.close = Some(id),
-            Hit::CreateTab => {
+            // The `+` button and the dropdown's "new terminal" row create the same normal tab.
+            Hit::CreateTab | Hit::CreateShellTab => {
                 self.chrome.unfocus_viewer();
                 self.chrome_actions.create = true;
+            },
+            Hit::NewTabMenu => self.chrome.toggle_new_tab_menu(),
+            Hit::CreateClaudeTab => {
+                self.chrome.unfocus_viewer();
+                self.chrome_actions.create_claude = true;
             },
             Hit::SelectProject(i) => self.chrome_actions.select_project = Some(i),
             Hit::CloseProject(i) => self.chrome_actions.close_project = Some(i),
@@ -1977,6 +1996,7 @@ impl Display {
         match cmd {
             PaletteCmd::Settings => self.chrome_actions.open_settings = true,
             PaletteCmd::NewTab => self.chrome_actions.create = true,
+            PaletteCmd::NewClaude => self.chrome_actions.create_claude = true,
             PaletteCmd::NewProject => self.chrome_actions.create_project = true,
             PaletteCmd::ToggleSidebar => self.chrome_actions.toggle_sidebar = true,
             PaletteCmd::ToggleProjectPane => self.chrome_actions.toggle_pane = true,
